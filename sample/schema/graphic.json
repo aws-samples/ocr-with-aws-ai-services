@@ -1,0 +1,2 @@
+	
+{"type":"object","properties":{"table":{"type":"array","items":{"type":"object","properties":{"net":{"type":"number"},"category":{"type":"string"},"very_well":{"type":"number"},"fairly_well":{"type":"number"}}}},"title":{"type":"string"}}}

@@ -1,0 +1,28 @@
+{
+    "date": "2025-12-31",
+    "rent": {
+      "monthlyAmount": 9750,
+      "securityDeposit": 2317
+    },
+    "lease": {
+      "years": 4,
+      "months": 2,
+      "endDate": "2030-03-03",
+      "startDate": "2025-12-31"
+    },
+    "lessee": {
+      "name": "Weimann Inc",
+      "state": "California",
+      "streetAddress": "84784 Godfrey Grove"
+    },
+    "lessor": {
+      "name": "Mrs. Patti Fay MD",
+      "state": "California",
+      "streetAddress": "51323 Unique Village"
+    },
+    "premises": {
+      "spaceType": "Warehouse",
+      "squareFeet": "1543",
+      "streetAddress": "52577 Hailey Corners"
+    }
+  }

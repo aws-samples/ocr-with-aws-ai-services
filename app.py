@@ -1,0 +1,72 @@
+import os
+import gradio as gr
+import datetime
+from shared.config import CUSTOM_THEME, logger
+from ui import create_input_panel, create_common_options_panel, create_bedrock_options_panel, create_bda_options_panel, create_results_panel, create_results_table
+from event_handler import setup_event_handlers
+
+def create_ocr_app():
+    """Create the OCR application with all components"""
+    with gr.Blocks(theme=CUSTOM_THEME) as app:
+        gr.Markdown("# 📝 Multi-Engine OCR Application\n\nUpload an image containing text and select your preferred processing engines.")
+        
+        # Current timestamp display
+        timestamp_html = gr.HTML(
+            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            label="Current Time",
+            every=1
+        )
+        
+        with gr.Row():
+            # Left column for inputs
+            with gr.Column(scale=1):
+                # Create input panel
+                input_panel, sample_dropdown, input_image, refresh_samples = create_input_panel()
+                
+                # Engine selection
+                with gr.Row():
+                    use_textract = gr.Checkbox(value=True, label="Use Textract")
+                    use_bedrock = gr.Checkbox(value=False, label="Use Bedrock")
+                    use_bda = gr.Checkbox(value=False, label="Use BDA")
+                
+                # Create common options panel
+                common_options, document_type, output_schema = create_common_options_panel()
+                
+                # Create engine-specific option panels
+                bedrock_options, bedrock_model = create_bedrock_options_panel()
+                bda_options, bda_s3_bucket, use_bda_blueprint = create_bda_options_panel()
+                
+                # Process buttons
+                with gr.Row():
+                    process_sample_button = gr.Button("Process Sample", variant="primary")
+                    process_all_button = gr.Button("Process All Samples", variant="secondary")
+            
+            # Right column for results
+            with gr.Column(scale=2):
+                # Global status for all processing
+                global_status = gr.HTML("<div class='status-ready'>Ready for processing</div>", label="Status")
+                results_table = create_results_table()
+                
+                # Results panel with tabs for each engine
+                results_panel, input_components, output_components = create_results_panel()
+        
+        # Insert global status at the beginning of output components
+        output_components.insert(0, global_status)
+        
+        # Setup event handlers
+        setup_event_handlers(
+            use_textract, use_bedrock, bedrock_options, 
+            use_bda, bda_options,
+            sample_dropdown, input_image, output_schema,
+            refresh_samples, process_sample_button, process_all_button,
+            bedrock_model, document_type, bda_s3_bucket,
+            input_components, output_components, use_bda_blueprint,
+            results_table
+        )
+    
+    return app
+
+
+if __name__ == "__main__":
+    demo = create_ocr_app()
+    demo.launch(share=True)
