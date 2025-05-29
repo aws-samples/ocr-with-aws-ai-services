@@ -23,15 +23,15 @@ def get_image_hash(image):
     """
     if isinstance(image, str):
         with open(image, 'rb') as f:
-            return hashlib.md5(f.read(), usedforsecurity=False).hexdigest()
+            return hashlib.sha256(f.read()).hexdigest()
     elif isinstance(image, np.ndarray):
-        return hashlib.md5(image.tobytes(), usedforsecurity=False).hexdigest()
+        return hashlib.sha256(image.tobytes()).hexdigest()
     elif isinstance(image, Image.Image):
         img_bytes = io.BytesIO()
         image.save(img_bytes, format='PNG')
-        return hashlib.md5(img_bytes.getvalue(), usedforsecurity=False).hexdigest()
+        return hashlib.sha256(img_bytes.getvalue()).hexdigest()
     else:
-        return hashlib.md5(str(image).encode(), usedforsecurity=False).hexdigest()
+        return hashlib.sha256(str(image).encode()).hexdigest()
 
 def get_image_object(image):
     """
