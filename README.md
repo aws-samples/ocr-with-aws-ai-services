@@ -15,6 +15,8 @@ This application provides a unified interface for extracting text and structured
    - **Custom Blueprint Method**: Creates a custom document processing blueprint based on the provided JSON schema
    - **LLM Post-processing Method**: Uses standard BDA extraction followed by Bedrock LLM to structure the data (default method)
 
+<img src="asset/sample-ui.png" width="900" alt="UI">
+
 The application enables side-by-side comparison of these services' accuracy, cost, and processing time across different document types, helping you choose the optimal service for your specific OCR needs.
 
 ## Key Features
