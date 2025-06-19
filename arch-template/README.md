@@ -9,6 +9,8 @@ This CloudFormation template deploys an OCR document processing solution with th
 - **DynamoDB Table**: Storage for extracted data
 - **IAM Role**: Required AWS service permissions
 
+<img src="arch-diagram.png" width="900" alt="UI">
+
 ## Post-Deployment Configuration
 
 ### 1. S3 Event Notification Setup
