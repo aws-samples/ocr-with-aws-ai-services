@@ -1,0 +1,527 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Textract document processing solution with DynamoDB storage'
+
+Parameters:
+  # Core environment parameters
+  AwsRegion:
+    Type: String
+    Default: us-east-1
+    Description: The AWS Region to deploy resources to
+  
+  # Resource naming parameters
+  BucketNamePrefix:
+    Type: String
+    Default: textract-processor-files
+    Description: Prefix for the S3 bucket name (will be suffixed with account ID)
+  
+  DynamoDBTableName:
+    Type: String
+    Default: Textract-ImageExtractions
+    Description: Name for the DynamoDB table
+  
+  LambdaFunctionName:
+    Type: String
+    Default: textract-processor
+    Description: Name of the Lambda function
+    
+  RoleNamePrefix:
+    Type: String
+    Default: textract-processor-role
+    Description: Prefix for the IAM role name (will be suffixed with a random value)
+
+  # Integration parameters
+  BedrockModelId:
+    Type: String
+    Default: us.anthropic.claude-3-7-sonnet-20250219-v1:0
+    Description: Bedrock model ID for post-processing
+
+Resources:
+  IAMRoleTextractProcessor:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/service-role/"
+      MaxSessionDuration: 3600
+      RoleName: !Sub "${RoleNamePrefix}-${AWS::StackName}"
+      Policies:
+      - PolicyName: "textract-processor-permissions"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Resource:
+            - !Sub "arn:aws:s3:::${BucketNamePrefix}-${AWS::AccountId}*"
+            - !Sub "arn:aws:s3:::${BucketNamePrefix}-${AWS::AccountId}"
+            Action:
+            - "s3:GetObject"
+            - "s3:PutObject"
+            - "s3:ListBucket"
+            Effect: "Allow"
+          - Resource: "*"
+            Action:
+            - "textract:DetectDocumentText"
+            - "textract:AnalyzeDocument"
+            Effect: "Allow"
+          - Resource:
+            - !Sub "arn:aws:bedrock:*::foundation-model/*"
+            - "arn:aws:bedrock:*:165361166149:custom-model/*"
+            - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
+            Action:
+            - "bedrock:InvokeModel"
+            Effect: "Allow"
+          - Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTableName}"
+            Action:
+            - "dynamodb:GetItem"
+            - "dynamodb:PutItem"
+            - "dynamodb:UpdateItem"
+            - "dynamodb:DeleteItem"
+            - "dynamodb:Query"
+            Effect: "Allow"
+          - Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+            Action: "logs:CreateLogGroup"
+            Effect: "Allow"
+          - Resource:
+            - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${LambdaFunctionName}:*"
+            Action:
+            - "logs:CreateLogStream"
+            - "logs:PutLogEvents"
+            Effect: "Allow"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: "sts:AssumeRole"
+          Effect: "Allow"
+          Principal:
+            Service: "lambda.amazonaws.com"
+
+  S3BucketTextractProcessor:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        RestrictPublicBuckets: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        BlockPublicAcls: true
+      BucketName: !Sub "${BucketNamePrefix}-${AWS::AccountId}"
+      OwnershipControls:
+        Rules:
+        - ObjectOwnership: "BucketOwnerEnforced"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - BucketKeyEnabled: true
+          ServerSideEncryptionByDefault:
+            SSEAlgorithm: "AES256"
+
+  DynamoDBTableTextractImageExtractions:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref DynamoDBTableName
+      AttributeDefinitions:
+      - AttributeType: "S"
+        AttributeName: "imageKey"
+      - AttributeType: "S"
+        AttributeName: "sessionId"
+      BillingMode: "PAY_PER_REQUEST"
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: false
+      WarmThroughput:
+        ReadUnitsPerSecond: 12000
+        WriteUnitsPerSecond: 4000
+      KeySchema:
+      - KeyType: "HASH"
+        AttributeName: "sessionId"
+      - KeyType: "RANGE"
+        AttributeName: "imageKey"
+      DeletionProtectionEnabled: false
+      TableClass: "STANDARD"
+
+  LambdaFunctionTextractProcessor:
+    Type: AWS::Lambda::Function
+    Properties:
+      MemorySize: 128
+      Description: "Lambda function to process documents with Amazon Textract"
+      TracingConfig:
+        Mode: "PassThrough"
+      Timeout: 60
+      RuntimeManagementConfig:
+        UpdateRuntimeOn: "Auto"
+      Handler: "lambda_function.lambda_handler"
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import boto3
+          import csv
+          import io
+          import logging
+          import time
+          import urllib.parse
+          from PIL import Image, ImageDraw
+          from decimal import Decimal
+          from boto3.dynamodb.conditions import Key
+
+          # Configure logger
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # Initialize AWS service clients/resources
+          s3 = boto3.client('s3')
+          textract = boto3.client('textract')
+          bedrock = boto3.client('bedrock-runtime')
+          dynamodb = boto3.resource('dynamodb')
+
+          # Environment-based configuration
+          DDB_TABLE = os.environ['DDB_TABLE']                    # DynamoDB table name
+          POSTPROCESSING_MODEL = os.environ['POSTPROCESSING_MODEL']  # Bedrock model ID
+          MAX_IMAGE_SIZE_MB = int(os.environ['MAX_IMAGE_SIZE'])  # Max image size in MB
+          MAX_IMAGE_SIZE = MAX_IMAGE_SIZE_MB * 1024 * 1024       # Convert MB to bytes
+          ANNOTATED_IMAGE_FOLDER = os.environ['ANNOTATED_IMAGES_FOLDER']  # S3 folder for annotated images
+          SCHEMA_FILE = os.environ['SCHEMA_FILE'] #schema file on S3
+          FIELD_DESCRIPTION_FILE = os.environ['FIELD_DESCRIPTION_FILE'] #field description file on S3
+          CSV_FILE_FOLDER = os.environ['CSV_FILES_FOLDER'] # S3 folder for CSV files
+
+          # Bedrock system prompt
+          JSON_SYSTEM_PROMPT = """
+          You are an AI assistant specialized in structuring extracted document text into JSON format.
+          Your task is to analyze the document content and create the most appropriate JSON structure.
+          Focus on capturing all relevant information in a logical hierarchy.
+          Ensure the JSON is valid and represents the information accurately.
+          IMPORTANT: When returning JSON, do not use code blocks, backticks or markdown formatting.
+          """
+
+          def load_json_from_s3(bucket: str, key: str) -> dict:
+              """
+              Load and parse a JSON object from S3.
+
+              Args:
+                  bucket (str): Name of the S3 bucket.
+                  key (str): Key of the JSON file in S3.
+
+              Returns:
+                  dict: Parsed JSON content.
+              """
+              logger.info(f"Loading JSON from s3://{bucket}/{key}")
+              resp = s3.get_object(Bucket=bucket, Key=key)
+              content = resp['Body'].read().decode('utf-8')
+              return json.loads(content)
+
+          def extract_text(image_bytes: bytes):
+              """
+              Use Textract to extract line-level text and bounding boxes from image bytes.
+
+              Args:
+                  image_bytes (bytes): Raw image data.
+
+              Returns:
+                  tuple:
+                      raw_text (str): Concatenated lines of text.
+                      avg_confidence (float): Average confidence score for detected lines.
+                      img_pil (PIL.Image): Image with drawn bounding boxes.
+              """
+              logger.info("Starting text extraction with Textract")
+              # Prepare image for annotation
+              img_pil = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+              draw = ImageDraw.Draw(img_pil)
+              w, h = img_pil.size
+
+              # Call Textract API
+              response = textract.detect_document_text(Document={'Bytes': image_bytes})
+              extracted = []
+              line_confidence = []
+
+              # Iterate through blocks and capture LINEs
+              for block in response.get('Blocks', []):
+                  if block['BlockType'] == 'LINE':
+                      text = block['Text']
+                      confidence = block.get('Confidence', 0.0)
+                      extracted.append(text)
+                      line_confidence.append(confidence)
+
+                      # Draw bounding box if available
+                      geom = block.get('Geometry', {}).get('BoundingBox')
+                      if geom:
+                          left = w * geom['Left']
+                          top = h * geom['Top']
+                          width = w * geom['Width']
+                          height = h * geom['Height']
+                          draw.rectangle(
+                              [(left, top), (left + width, top + height)],
+                              outline='red', width=2
+                          )
+
+              raw_text = "\n".join(extracted)
+              avg_confidence = sum(line_confidence) / len(line_confidence) if line_confidence else 0.0
+              logger.info(f"Extracted text with average confidence {avg_confidence:.2f}")
+              return raw_text, avg_confidence, img_pil
+
+          def save_annotated_image(img_pil: Image, bucket: str, original_key: str) -> str:
+              """
+              Save an annotated image back to S3 for debugging.
+
+              Args:
+                  img_pil (PIL.Image): Annotated PIL Image.
+                  bucket (str): S3 bucket name where to save.
+                  original_key (str): Original image key to derive debug filename.
+
+              Returns:
+                  str: S3 key of the saved annotated image.
+              """
+              logger.info("Saving annotated image to S3 for debugging")
+              # Convert annotated image to bytes
+              img_buf = io.BytesIO()
+              img_pil.save(img_buf, format='JPEG')
+              img_data = img_buf.getvalue()
+
+              # Generate debug path
+              filename = os.path.basename(original_key)
+              debug_key = f"{ANNOTATED_IMAGE_FOLDER}/annotated_{filename}"
+
+              # Upload to S3
+              s3.put_object(Bucket=bucket, Key=debug_key,
+                          Body=img_data, ContentType='image/jpeg')
+              logger.info(f"Annotated image saved to s3://{bucket}/{debug_key}")
+              return debug_key
+
+          def process_with_bedrock(text: str, schema: dict, field_desc: dict,
+                                image_bytes: bytes, image_ext: str):
+              """
+              Structure extracted text into JSON using a multimodal Bedrock model.
+
+              Args:
+                  text (str): Extracted text from image.
+                  schema (dict): JSON schema definition.
+                  field_desc (dict): Descriptions for each schema field.
+                  image_bytes (bytes): Original (or resized/compressed) image bytes.
+                  image_ext (str): Image format extension (e.g., 'jpeg', 'png').
+
+              Returns:
+                  tuple:
+                      structured (dict): JSON object following the schema.
+                      usage (dict): Token usage info from Bedrock.
+              """
+              logger.info("Calling Bedrock multimodal model for JSON structuring")
+              prompt = (
+                  f"Convert the text below extracted from the attached image into JSON. "
+                  f"Correct any missing text found in the extracted text from the image only.\n\n"
+                  f"{text}\n\n"
+                  f"Here is the json schema: {json.dumps(schema)}\n"
+                  f"Here are the field Descriptions: {json.dumps(field_desc)}\n"
+                  "Return only the raw JSON with all the fields in the schema. "
+                  "Add empty string if no match for the field is found."
+              )
+              if image_ext == 'jpg': # supported types [gif, jpeg, png, webp]
+                  image_ext = 'jpeg' 
+              messages = [{
+                  "role": "user",
+                  "content": [
+                      {"text": prompt},
+                      {"image": {"format": image_ext, "source": {"bytes": image_bytes}}}
+                  ]
+              }]
+
+              response = bedrock.converse(
+                  modelId=POSTPROCESSING_MODEL,
+                  messages=messages,
+                  system=[{"text": JSON_SYSTEM_PROMPT}]
+              )
+
+              content = response['output']['message']['content'][0]['text']
+              try:
+                  structured = json.loads(content)
+              except json.JSONDecodeError:
+                  logger.error("Failed to parse JSON from Bedrock response")
+                  structured = {"error": "failed to parse JSON", "raw": content}
+
+              usage = response.get('usage', {})
+              logger.info("Bedrock structuring complete")
+              return structured, usage
+
+          def resize_image(image_bytes: bytes, max_dimension: int = 2000) -> bytes:
+              """
+              Resize the image so its longest side is <= max_dimension pixels,
+              preserving aspect ratio.
+
+              Args:
+                  image_bytes (bytes): Input image data.
+                  max_dimension (int): Maximum width/height in pixels.
+
+              Returns:
+                  bytes: Resized image bytes, or original if no resizing needed.
+              """
+              logger.debug("Resizing image if necessary")
+              img = Image.open(io.BytesIO(image_bytes))
+              fmt = img.format or 'JPEG'
+              w, h = img.size
+              ratio = min(max_dimension / w, max_dimension / h)
+              if ratio < 1:
+                  new_size = (int(w * ratio), int(h * ratio))
+                  img = img.resize(new_size, Image.Resampling.LANCZOS)
+                  out = io.BytesIO()
+                  img.save(out, format=fmt)
+                  logger.debug(f"Image resized to {new_size}")
+                  return out.getvalue()
+              return image_bytes
+
+          def compress_image(image_bytes: bytes, max_size: int = MAX_IMAGE_SIZE) -> bytes:
+              """
+              Compress JPEG images by reducing quality in steps until under max_size.
+
+              Args:
+                  image_bytes (bytes): Input image data.
+                  max_size (int): Max allowed size in bytes.
+
+              Returns:
+                  bytes: Compressed image bytes, or original if compression not needed.
+              """
+              logger.debug("Compressing image by lowering JPEG quality")
+              img = Image.open(io.BytesIO(image_bytes))
+              fmt = img.format or 'JPEG'
+              quality = 95
+              out = io.BytesIO()
+              while quality > 10:
+                  out.seek(0)
+                  out.truncate()
+                  img.save(out, format=fmt, quality=quality)
+                  if out.tell() <= max_size:
+                      logger.debug(f"Image compressed to {out.tell()} bytes at quality {quality}")
+                      return out.getvalue()
+                  quality -= 5
+              logger.warning("Unable to compress image below max size; using original bytes")
+              return image_bytes
+
+          def write_session_csv(items: list, schema_keys: list, bucket: str, key: str):
+              """
+              Build and upload a consolidated CSV of all session records.
+
+              Args:
+                  items (list): DynamoDB items for the session.
+                  schema_keys (list): Order of JSON schema keys as CSV columns.
+                  bucket (str): S3 bucket for CSV output.
+                  key (str): S3 object key for the session CSV.
+              """
+              logger.info(f"Building consolidated CSV with {len(items)} records")
+              buf = io.StringIO()
+              writer = csv.writer(buf)
+              writer.writerow(['imageKey'] + schema_keys)
+              for it in items:
+                  row = [it['imageKey']] + [it['jsonData'].get(k, '') for k in schema_keys]
+                  writer.writerow(row)
+              s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+              logger.info(f"Session CSV uploaded to s3://{bucket}/{key}")
+
+          def lambda_handler(event, context):
+              """
+              AWS Lambda entry point. Triggered by S3 PUT events for new images.
+              Executes the following steps:
+              1. Group by UTC date (session)
+              2. Load JSON schema & descriptions
+              3. Fetch and optionally resize/compress image
+              4. Extract text & confidence via Textract
+              5. Save annotated image for debugging
+              6. Structure text via Bedrock LLM
+              7. Persist results to DynamoDB
+              8. Rebuild and upload consolidated session CSV
+              """
+              # 1) Generate session ID by date
+              session_id = time.strftime('%Y-%m-%d', time.gmtime())
+              table = dynamodb.Table(DDB_TABLE)
+
+              # 2) Parse S3 event for image details
+              record = event['Records'][0]['s3']
+              bucket = record['bucket']['name']
+              key = urllib.parse.unquote_plus(record['object']['key'])
+              logger.info(f"Lambda triggered for s3://{bucket}/{key}")
+
+              # 3) Load schema definitions
+              schema = load_json_from_s3(bucket, SCHEMA_FILE)
+              field_desc = load_json_from_s3(bucket, FIELD_DESCRIPTION_FILE)
+
+              # 4) Download and prepare the image data
+              raw_bytes = s3.get_object(Bucket=bucket, Key=key)['Body'].read()
+              image_ext = key.rsplit('.', 1)[-1].lower()
+              
+              # Images are resized/compressed if needed while maintaining quality
+              resized = resize_image(raw_bytes)
+              image_bytes = resized if len(resized) <= MAX_IMAGE_SIZE else compress_image(resized)
+
+              # 5) Extract text and compute confidence score
+              # Textract provides both the text content and confidence metrics for quality assurance
+              raw_text, text_confidence, img_pil = extract_text(image_bytes)
+              text_confidence = Decimal(str(text_confidence))
+
+              # 6) Save annotated debug image
+              save_annotated_image(img_pil, bucket, key)
+
+              # 7) Structure text into JSON using Bedrock LLM
+              # The AI model analyzes both the extracted text and the original image to ensure accurate data structuring
+              structured, usage = process_with_bedrock(
+                  raw_text, schema, field_desc, image_bytes, image_ext
+              )
+
+              # 8) Persist results in DynamoDB
+              # Store all processing results including confidence scores for tracking and analysis
+              table.put_item(Item={
+                  'sessionId': session_id,
+                  'imageKey': key,
+                  'jsonData': structured,
+                  'diff': {},  # placeholder for diff logic
+                  'confidence': text_confidence,
+                  'processedAt': int(time.time())
+              })
+              logger.info("Result persisted to DynamoDB")
+
+              # 9) Rebuild the consolidated CSV for this session
+              resp = table.query(KeyConditionExpression=Key('sessionId').eq(session_id))
+              items = resp.get('Items', [])
+              schema_keys = list(schema.keys())
+              session_csv_key = f"{CSV_FILE_FOLDER}/{session_id}.csv"
+              write_session_csv(items, schema_keys, bucket, session_csv_key)
+
+              # 10) Return CSV location
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({'sessionCsv': session_csv_key})
+              }
+      Role: !GetAtt IAMRoleTextractProcessor.Arn
+      FunctionName: !Ref LambdaFunctionName
+      Runtime: "python3.12"
+      PackageType: "Zip"
+      LoggingConfig:
+        LogFormat: "Text"
+        LogGroup: !Sub "/aws/lambda/${LambdaFunctionName}"
+      RecursiveLoop: "Terminate"
+      Environment:
+        Variables:
+          DDB_TABLE: !Ref DynamoDBTableName
+          CSV_FILES_FOLDER: "csv_files"
+          POSTPROCESSING_MODEL: !Ref BedrockModelId
+          MAX_IMAGE_SIZE: "5"
+          ANNOTATED_IMAGES_FOLDER: "annotated_images"
+          FIELD_DESCRIPTION_FILE: "schema/field_description.json"
+          SCHEMA_FILE: "schema/schema.json"
+      EphemeralStorage:
+        Size: 512
+      Layers:
+      - !Sub "arn:aws:lambda:${AWS::Region}:770693421928:layer:Klayers-p312-Pillow:6"
+      Architectures:
+      - "x86_64"
+
+  LambdaPermissionFunctionTextractProcessor:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt LambdaFunctionTextractProcessor.Arn
+      Action: "lambda:InvokeFunction"
+      SourceArn: !GetAtt S3BucketTextractProcessor.Arn
+      Principal: "s3.amazonaws.com"
+      SourceAccount: !Ref AWS::AccountId
+
+Outputs:
+  S3BucketName:
+    Description: "S3 bucket for storing documents and processed results"
+    Value: !Ref S3BucketTextractProcessor
+    
+  DynamoDBTableName:
+    Description: "DynamoDB table storing document extraction results"
+    Value: !Ref DynamoDBTableTextractImageExtractions
+    
+  LambdaFunctionArn:
+    Description: "Lambda function ARN"
+    Value: !GetAtt LambdaFunctionTextractProcessor.Arn
