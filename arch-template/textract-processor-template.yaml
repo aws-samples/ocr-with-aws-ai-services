@@ -62,8 +62,7 @@ Resources:
             Effect: "Allow"
           - Resource:
             - !Sub "arn:aws:bedrock:*::foundation-model/*"
-            - "arn:aws:bedrock:*:165361166149:custom-model/*"
-            - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
+            - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/${BedrockModelId}"
             Action:
             - "bedrock:InvokeModel"
             Effect: "Allow"
@@ -143,7 +142,7 @@ Resources:
       Timeout: 60
       RuntimeManagementConfig:
         UpdateRuntimeOn: "Auto"
-      Handler: "lambda_function.lambda_handler"
+      Handler: "index.lambda_handler"
       Code:
         ZipFile: |
           import os
