@@ -2,7 +2,7 @@ import os
 import gradio as gr
 import datetime
 from shared.config import CUSTOM_THEME, logger
-from ui import create_input_panel, create_common_options_panel, create_bedrock_options_panel, create_bda_options_panel, create_results_panel, create_results_table
+from ui import create_input_panel, create_common_options_panel, create_results_panel, create_results_table
 from event_handler import setup_event_handlers
 
 def create_ocr_app():
@@ -21,7 +21,9 @@ def create_ocr_app():
             # Left column for inputs
             with gr.Column(scale=1):
                 # Create input panel
-                input_panel, sample_dropdown, input_image, refresh_samples = create_input_panel()
+                (input_panel, sample_dropdown, input_image, refresh_samples, image_preview, pdf_preview,
+                 pdf_controls, prev_page_btn, page_info, next_page_btn, current_page, total_pages, current_pdf_path,
+                 process_file_button, process_all_samples_button) = create_input_panel()
                 
                 # Engine selection
                 with gr.Row():
@@ -30,16 +32,9 @@ def create_ocr_app():
                     use_bda = gr.Checkbox(value=False, label="Use BDA")
                 
                 # Create common options panel
-                common_options, document_type, output_schema = create_common_options_panel()
+                common_options, s3_bucket, document_type, enable_structured_output, output_schema, bedrock_model, bda_s3_bucket, use_bda_blueprint = create_common_options_panel()
                 
-                # Create engine-specific option panels
-                bedrock_options, bedrock_model = create_bedrock_options_panel()
-                bda_options, bda_s3_bucket, use_bda_blueprint = create_bda_options_panel()
-                
-                # Process buttons
-                with gr.Row():
-                    process_sample_button = gr.Button("Process Sample", variant="primary")
-                    process_all_button = gr.Button("Process All Samples", variant="secondary")
+                # These buttons are now in the input panel under preview
             
             # Right column for results
             with gr.Column(scale=2):
@@ -55,13 +50,13 @@ def create_ocr_app():
         
         # Setup event handlers
         setup_event_handlers(
-            use_textract, use_bedrock, bedrock_options, 
-            use_bda, bda_options,
-            sample_dropdown, input_image, output_schema,
-            refresh_samples, process_sample_button, process_all_button,
+            use_textract, use_bedrock, use_bda,
+            sample_dropdown, input_image, s3_bucket, enable_structured_output, output_schema,
+            refresh_samples, process_file_button, process_all_samples_button,
             bedrock_model, document_type, bda_s3_bucket,
             input_components, output_components, use_bda_blueprint,
-            results_table
+            results_table, image_preview, pdf_preview, pdf_controls,
+            prev_page_btn, page_info, next_page_btn, current_page, total_pages, current_pdf_path
         )
     
     return app

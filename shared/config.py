@@ -10,6 +10,7 @@ MAX_IMAGE_SIZE = 5 * 1024 * 1024 - 100000  # 5MB minus buffer for Bedrock
 
 # Available Bedrock models
 BEDROCK_MODELS = {
+    "Claude Sonnet 4": "us.anthropic.claude-sonnet-4-20250514-v1:0",
     "Claude 3.7 Sonnet": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
     "Claude 3.5 Sonnet": "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
     "Amazon Nova Premier": "us.amazon.nova-premier-v1:0",
@@ -18,14 +19,20 @@ BEDROCK_MODELS = {
 
 # Default model for post-processing
 # POSTPROCESSING_MODEL = "anthropic.claude-3-5-haiku-20241022-v1:0"
-POSTPROCESSING_MODEL = "us.anthropic.claude-3-7-sonnet-20250219-v1:0"
+POSTPROCESSING_MODEL = "us.anthropic.claude-sonnet-4-20250514-v1:0"
 
-# API cost information
+# API cost information - Only for APIs currently in use
 API_COSTS = {
-    'textract_detect': 1.50 / 1000,  # Detect Document Text API: $1.50 per 1,000 Pages
-    'textract_analyze_tables_forms': 65.00 / 1000,  # Tables + Forms: $65.00 per 1,000 Pages
+    # Currently used Textract APIs
+    'textract_detect': 1.50 / 1000,  # DetectDocumentText API: $1.50 per 1,000 pages
+    'textract_async': 1.50 / 1000,   # StartDocumentTextDetection API: $1.50 per 1,000 pages
+    
     'bedrock': {
         # Claude models
+        'us.anthropic.claude-sonnet-4-20250514-v1:0': {
+            'input': 0.003 / 1000,   # $0.003 per 1,000 input tokens
+            'output': 0.015 / 1000   # $0.015 per 1,000 output tokens
+        },
         'us.anthropic.claude-3-7-sonnet-20250219-v1:0': {
             'input': 0.003 / 1000,   # $0.003 per 1,000 input tokens
             'output': 0.015 / 1000   # $0.015 per 1,000 output tokens

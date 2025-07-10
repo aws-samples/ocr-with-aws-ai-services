@@ -171,8 +171,8 @@ def create_results_dataframe(engine_results):
     return pd.DataFrame(final_results)
 
 def process_image_with_engines(image, use_textract, use_bedrock, use_bda,
-                             bedrock_model_name, bda_s3_bucket="",
-                             document_type="generic", output_schema="",
+                             bedrock_model_name, bda_s3_bucket="", s3_bucket="ocr-with-ai-services-demo-bucket",
+                             document_type="generic", enable_structured_output=True, output_schema="",
                              use_bda_blueprint=False, image_name=None):
     """Process image with selected OCR engines in parallel"""
     total_start = time.time()
@@ -278,7 +278,10 @@ def process_image_with_engines(image, use_textract, use_bedrock, use_bda,
             futures['Textract'] = executor.submit(
                 textract_engine.process_image, 
                 image, 
-                {'output_schema': output_schema}
+                {
+                    'output_schema': output_schema if enable_structured_output else None,
+                    's3_bucket': s3_bucket
+                }
             )
         
         if use_bedrock:
@@ -299,7 +302,7 @@ def process_image_with_engines(image, use_textract, use_bedrock, use_bda,
                 {
                     's3_bucket': bda_s3_bucket,
                     'document_type': document_type,
-                    'output_schema': output_schema if output_schema else None,
+                    'output_schema': output_schema if enable_structured_output and output_schema else None,
                     'use_blueprint': use_bda_blueprint
                 }
             )

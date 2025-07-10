@@ -1,13 +1,11 @@
 # Core dependencies with pinned versions for security and stability
 gradio==5.31.0
-boto3==1.38.23
+boto3
 
 # Image processing dependencies
 Pillow==11.2.1
 numpy==2.2.6
 
 # Data processing dependencies  
-pandas==2.2.3
-
-# Additional dependencies that may be required
-botocore>=1.31.23,<1.32.0  # Ensure compatibility with boto3
+pandas
+pymupdf

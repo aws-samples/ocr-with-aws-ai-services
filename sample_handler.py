@@ -34,15 +34,14 @@ def load_sample_image_and_schema(sample_filename):
     if not sample_filename:
         return None, None
     
-    # Load the image
+    # Get the image path
     image_path = os.path.join("sample/images", sample_filename)
     if not os.path.exists(image_path):
         logger.error(f"Sample image not found: {image_path}")
         return None, None
     
-    image = Image.open(image_path)
-    image.name = sample_filename
-    logger.info(f"Loaded sample image: {image_path}")
+    # Return the file path instead of PIL Image object for Gradio File component
+    logger.info(f"Found sample image: {image_path}")
     
     # Load the schema if available
     schema = None
@@ -62,7 +61,7 @@ def load_sample_image_and_schema(sample_filename):
     else:
         logger.info(f"No schema found for sample: {schema_path}")
     
-    return image, schema
+    return image_path, schema
 
 def on_sample_selected(sample_filename):
     """
@@ -74,7 +73,7 @@ def on_sample_selected(sample_filename):
     Returns:
         Tuple of (image, schema, truth_data, truth_status_html)
     """
-    image, schema = load_sample_image_and_schema(sample_filename)
+    image_path, schema = load_sample_image_and_schema(sample_filename)
 
     truth_data, truth_exists = load_truth_data(sample_filename)
     
@@ -85,12 +84,12 @@ def on_sample_selected(sample_filename):
         truth_status_html = f"""<div style='padding: 10px; background-color: #ed6c02; color: white; 
                                 border-radius: 5px; font-weight: bold;'>No ground truth data available for {sample_filename}</div>"""
     
-    return image, schema, truth_data, truth_status_html
+    return image_path, schema, truth_data, truth_status_html
 
 
 def process_all_samples(use_textract, use_bedrock, use_bda,
-                     bedrock_model_name, bda_s3_bucket="",
-                     document_type="generic", output_schema="",
+                     bedrock_model_name, bda_s3_bucket="", s3_bucket="ocr-with-ai-services-demo-bucket",
+                     document_type="generic", enable_structured_output=True, output_schema="",
                      use_bda_blueprint=False):
     """Process all sample images with parallel engine processing"""
     
@@ -163,7 +162,10 @@ def process_all_samples(use_textract, use_bedrock, use_bda,
                 if use_textract:
                     futures['Textract'] = executor.submit(
                         textract_engine.process_image,
-                        image, {"output_schema": image_output_schema}
+                        image, {
+                            "output_schema": image_output_schema if enable_structured_output else None,
+                            "s3_bucket": s3_bucket
+                        }
                     )
                 
                 if use_bedrock:
@@ -172,7 +174,7 @@ def process_all_samples(use_textract, use_bedrock, use_bda,
                         image, {
                             'model_id': model_id,
                             'document_type': document_type,
-                            'output_schema': image_output_schema if image_output_schema else None
+                            'output_schema': image_output_schema if enable_structured_output and image_output_schema else None
                         }
                     )
                 
@@ -182,7 +184,7 @@ def process_all_samples(use_textract, use_bedrock, use_bda,
                         image, {
                             's3_bucket': bda_s3_bucket,
                             'document_type': document_type,
-                            'output_schema': image_output_schema if image_output_schema else None,
+                            'output_schema': image_output_schema if enable_structured_output and image_output_schema else None,
                             'use_blueprint': use_bda_blueprint
                         }
                     )

@@ -22,10 +22,10 @@ class BDAEngine(OCREngine):
         
     def process_image(self, image, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Process an image with Amazon BDA using blueprint or standard processing
+        Process an image or PDF with Amazon BDA using blueprint or standard processing
         
         Args:
-            image: PIL Image, numpy array, or path to image
+            image: PIL Image, numpy array, path to image, or PDF file
             options: Dictionary of options including:
                 - s3_bucket: S3 bucket for BDA processing
                 - document_type: Type of document
@@ -41,22 +41,33 @@ class BDAEngine(OCREngine):
         output_schema = options.get('output_schema')
         use_blueprint = options.get('use_blueprint', False)
         
+        # Check if input is a PDF file
+        is_pdf = self._is_pdf_input(image)
+        
         if use_blueprint:
-            return self._process_with_bda_blueprint(image, s3_bucket, document_type, output_schema)
+            return self._process_with_bda_blueprint(image, s3_bucket, document_type, output_schema, is_pdf)
         else:
-            return self._process_with_bda_llm(image, s3_bucket, document_type, output_schema)
+            return self._process_with_bda_llm(image, s3_bucket, document_type, output_schema, is_pdf)
     
-    def _process_with_bda_blueprint(self, image, s3_bucket, document_type, output_schema):
+    def _is_pdf_input(self, image):
+        """Check if input is a PDF file"""
+        if hasattr(image, 'name') and image.name and image.name.lower().endswith('.pdf'):
+            return True
+        elif isinstance(image, str) and image.lower().endswith('.pdf'):
+            return True
+        return False
+    
+    def _process_with_bda_blueprint(self, image, s3_bucket, document_type, output_schema, is_pdf=False):
         """
         Process with BDA using custom blueprint based on output schema
         """
-        return self._process_with_bda(image, s3_bucket, document_type, output_schema, use_blueprint=True)
+        return self._process_with_bda(image, s3_bucket, document_type, output_schema, use_blueprint=True, is_pdf=is_pdf)
     
-    def _process_with_bda_llm(self, image, s3_bucket, document_type, output_schema):
+    def _process_with_bda_llm(self, image, s3_bucket, document_type, output_schema, is_pdf=False):
         """
         Process with BDA using default extraction and LLM post-processing
         """
-        return self._process_with_bda(image, s3_bucket, document_type, output_schema, use_blueprint=False)
+        return self._process_with_bda(image, s3_bucket, document_type, output_schema, use_blueprint=False, is_pdf=is_pdf)
     
     def _convert_schema_to_blueprint_format(self, schema_json_str, document_type="generic"):
         """
@@ -132,16 +143,17 @@ class BDAEngine(OCREngine):
             return type_value
         return "string"
     
-    def _process_with_bda(self, image, s3_bucket=None, document_type="generic", output_schema=None, use_blueprint=True):
+    def _process_with_bda(self, image, s3_bucket=None, document_type="generic", output_schema=None, use_blueprint=True, is_pdf=False):
         """
-        Process image with Amazon BDA
+        Process image or PDF with Amazon BDA
         
         Args:
-            image: Image to process
+            image: Image or PDF to process
             s3_bucket: S3 bucket name for BDA processing
             document_type: Type of document
             output_schema: JSON schema for output structuring
             use_blueprint: Whether to use custom blueprint (True) or post-process with LLM (False)
+            is_pdf: Whether the input is a PDF file
             
         Returns:
             Dictionary with processing results
@@ -151,12 +163,24 @@ class BDAEngine(OCREngine):
         # Set up timing context manager
         timing_ctx = self.get_timing_wrapper()
         
-        # Convert image to bytes OUTSIDE the timing context
-        image_bytes, img_pil = convert_to_bytes(image)
+        # Handle file processing based on type
+        if is_pdf:
+            # For PDF files, read the file bytes directly
+            if hasattr(image, 'name') and image.name:
+                with open(image.name, 'rb') as f:
+                    file_bytes = f.read()
+            elif isinstance(image, str):
+                with open(image, 'rb') as f:
+                    file_bytes = f.read()
+            else:
+                raise ValueError("PDF input must be a file path or file object")
+            img_pil = None  # No PIL image for PDF
+        else:
+            # Convert image to bytes OUTSIDE the timing context
+            file_bytes, img_pil = convert_to_bytes(image)
         
         # Start timing for the actual processing
         with timing_ctx:
-            width, height = img_pil.size
             
             bda_client = get_aws_client('bedrock-data-automation')
             bda_runtime_client = get_aws_client('bedrock-data-automation-runtime')
@@ -176,17 +200,23 @@ class BDAEngine(OCREngine):
                         "process_time": timing_ctx.process_time
                     }
                 
-                # Upload image to S3
+                # Upload file to S3
                 timestamp = int(time.time())
                 random_id = uuid.uuid4().hex[:8]
                 input_prefix = "bda-input"
-                object_key = f"{input_prefix}/{timestamp}-{random_id}.jpg"
+                
+                if is_pdf:
+                    object_key = f"{input_prefix}/{timestamp}-{random_id}.pdf"
+                    content_type = "application/pdf"
+                else:
+                    object_key = f"{input_prefix}/{timestamp}-{random_id}.jpg"
+                    content_type = "image/jpeg"
                 
                 s3_client.put_object(
                     Bucket=s3_bucket,
                     Key=object_key,
-                    Body=image_bytes,
-                    ContentType="image/jpeg"
+                    Body=file_bytes,
+                    ContentType=content_type
                 )
                 
                 input_uri = f"s3://{s3_bucket}/{object_key}"
@@ -320,22 +350,42 @@ class BDAEngine(OCREngine):
                         blueprint_info += f"Document Class: {custom_output['document_class'].get('type', 'Unknown')}\n"
                 
                 # Determine which JSON to use for display and visualization
-                if use_blueprint and custom_output and 'explainability_info' in custom_output:
-                    annotated_image = self._create_annotated_image_with_bda_boxes(
-                        img_pil.copy(), width, height, custom_output)
+                if is_pdf:
+                    # For PDF files, create a simple placeholder image
+                    annotated_image = np.zeros((400, 600, 3), dtype=np.uint8)
+                    from PIL import Image as PILImage, ImageDraw as PILImageDraw
+                    pil_img = PILImage.fromarray(annotated_image)
+                    draw = PILImageDraw.Draw(pil_img)
+                    draw.text((20, 20), f"PDF Processed with BDA", fill=(255, 255, 255))
+                    draw.text((20, 50), f"File: {object_key}", fill=(255, 255, 255))
+                    annotated_image = np.array(pil_img)
                     
-                    if 'inference_result' in custom_output:
+                    if use_blueprint and custom_output and 'inference_result' in custom_output:
                         display_json = {'inference_result': custom_output['inference_result']}
-                    else:
-                        display_json = custom_output
-                else:
-                    # For non-blueprint approach or if custom output doesn't have explainability info
-                    annotated_image = self._create_annotated_image(
-                        img_pil.copy(), width, height, standard_output)
-                    if not use_blueprint and structured_json:
+                    elif not use_blueprint and structured_json:
                         display_json = structured_json
                     else:
-                        display_json = standard_output
+                        display_json = custom_output if custom_output else standard_output
+                else:
+                    # For images, get dimensions and create annotated images
+                    width, height = img_pil.size
+                    
+                    if use_blueprint and custom_output and 'explainability_info' in custom_output:
+                        annotated_image = self._create_annotated_image_with_bda_boxes(
+                            img_pil.copy(), width, height, custom_output)
+                        
+                        if 'inference_result' in custom_output:
+                            display_json = {'inference_result': custom_output['inference_result']}
+                        else:
+                            display_json = custom_output
+                    else:
+                        # For non-blueprint approach or if custom output doesn't have explainability info
+                        annotated_image = self._create_annotated_image(
+                            img_pil.copy(), width, height, standard_output)
+                        if not use_blueprint and structured_json:
+                            display_json = structured_json
+                        else:
+                            display_json = standard_output
                 
                 # Clean up temporary blueprint if it was created
                 if blueprint_arn:
