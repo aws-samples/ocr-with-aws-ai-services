@@ -1,5 +1,5 @@
 # Core dependencies with pinned versions for security and stability
-gradio==5.31.0
+gradio==6.7.0
 boto3
 
 # Image processing dependencies
