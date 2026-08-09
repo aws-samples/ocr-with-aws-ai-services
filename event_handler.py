@@ -1,9 +1,97 @@
+import json
+import os
+
 import gradio as gr
-from sample_handler import list_sample_images, on_sample_selected, process_all_samples
+from sample_handler import list_sample_documents, on_sample_selected, process_all_samples
 from processor import process_image_with_engines
-from shared.comparison_utils import create_diff_view
+from shared.comparison_utils import create_comparison_view
 from shared.config import logger
-from preview_handler import handle_file_preview, handle_sample_preview, navigate_pdf_page
+from shared.ui_theme import banner, page_readout
+from preview_handler import handle_file_preview, navigate_pdf_page
+
+
+def load_schema_from_file(schema_file):
+    """
+    Read and validate an uploaded JSON schema file
+
+    Args:
+        schema_file: Gradio File value - an object with a .name path, a path
+                     string, or None when the upload is cleared
+
+    Returns:
+        Tuple of (schema text for the editor, status HTML)
+
+    Raises:
+        gr.Error: If the file cannot be read or does not contain valid JSON. A
+                  broken schema must not be swallowed - extracting against the
+                  previously loaded schema instead would corrupt the accuracy
+                  numbers without any visible sign.
+    """
+    if not schema_file:
+        return gr.update(), "<div></div>"
+
+    schema_path = getattr(schema_file, 'name', schema_file)
+
+    try:
+        with open(schema_path, 'r', encoding='utf-8') as handle:
+            schema_text = handle.read()
+    except OSError as read_error:
+        logger.error(f"Failed to read schema file {schema_path}: {read_error}")
+        raise gr.Error(f"Could not read schema file: {read_error}")
+
+    try:
+        schema = json.loads(schema_text)
+    except json.JSONDecodeError as parse_error:
+        logger.error(f"Invalid JSON in schema file {schema_path}: {parse_error}")
+        raise gr.Error(
+            f"Schema file is not valid JSON (line {parse_error.lineno}, "
+            f"column {parse_error.colno}): {parse_error.msg}"
+        )
+
+    if not isinstance(schema, dict):
+        raise gr.Error("Schema file must contain a JSON object at the top level")
+
+    file_name = os.path.basename(schema_path)
+    property_count = len(schema.get('properties', {}))
+    logger.info(f"Loaded output schema from {file_name} ({property_count} top-level properties)")
+
+    status_html = banner(
+        tone="ok",
+        text=f"Loaded <b>{file_name}</b> — {property_count} top-level "
+             f"propert{'y' if property_count == 1 else 'ies'}"
+    )
+
+    return schema_text, status_html
+
+
+def handle_sample_selection(sample):
+    """
+    Load the selected sample's path, schema and ground truth
+
+    Assigning the resolved path to input_image triggers input_image.change, which is
+    what renders the preview - including PDF page navigation. Previewing is
+    deliberately not duplicated here.
+
+    A sample whose bundle holds no schema.json leaves the schema editor alone rather
+    than clearing it: gr.Code cannot take a None value, and batch processing already
+    treats a missing per-sample schema as "fall back to the editor" via
+    load_sample_schema(). Clearing it here would silently discard an uploaded schema.
+
+    Args:
+        sample: Dropdown label of the selected sample
+
+    Returns:
+        Tuple of (sample label, document path, schema update, truth data,
+        truth status HTML)
+    """
+    sample_result = on_sample_selected(sample)
+    if sample_result and len(sample_result) >= 4:
+        document_path, schema, truth_data, truth_status = sample_result
+        schema_update = schema if schema is not None else gr.update()
+        return sample, document_path, schema_update, truth_data, truth_status
+
+    return sample, None, gr.update(), None, None
+
 
 def setup_event_handlers(
     use_textract, use_bedrock, use_bda,
@@ -11,10 +99,11 @@ def setup_event_handlers(
     refresh_samples, process_file_button, process_all_samples_button,
     bedrock_model, document_type, bda_s3_bucket,
     input_components, output_components, use_bda_blueprint,
-    results_table, image_preview, pdf_preview, pdf_controls, 
-    prev_page_btn, page_info, next_page_btn, current_page, total_pages, current_pdf_path):
+    results_table, image_preview, pdf_preview, pdf_controls,
+    prev_page_btn, page_info, next_page_btn, current_page, total_pages, current_pdf_path,
+    textract_features, textract_queries, schema_upload, schema_status):
     """Setup all event handlers for the UI"""
-    
+
     # Get global_status from input_components
     global_status = input_components.get("global_status", output_components[0])
     
@@ -35,40 +124,32 @@ def setup_event_handlers(
     bedrock_json = input_components.get("bedrock_json")
     bda_json = input_components.get("bda_json")
     
-    # Modified to capture and store the selected sample name, and handle preview
-    def handle_sample_selection(sample):
-        sample_result = on_sample_selected(sample)
-        if sample_result and len(sample_result) >= 4:
-            image_path, schema, truth_data, truth_status = sample_result
-            # Handle preview for the selected sample
-            preview_result = handle_sample_preview(image_path)
-            return (sample, image_path, schema, truth_data, truth_status, 
-                   preview_result[0], preview_result[1])
-        else:
-            return (sample, None, None, None, None, None, 
-                   "<div style='text-align: center; padding: 50px; color: #666;'>No sample selected</div>")
-    
     sample_dropdown.change(
         fn=handle_sample_selection,
         inputs=sample_dropdown,
-        outputs=[current_sample_name, input_image, output_schema, truth_json, truth_status, 
-                image_preview, pdf_preview]
+        outputs=[current_sample_name, input_image, output_schema, truth_json, truth_status]
     )
-    
+
     refresh_samples.click(
-        fn=lambda: gr.Dropdown(choices=list_sample_images()),
+        fn=lambda: gr.Dropdown(choices=list_sample_documents()),
         outputs=sample_dropdown
     )
     
+    # Handle output schema upload
+    schema_upload.change(
+        fn=load_schema_from_file,
+        inputs=schema_upload,
+        outputs=[output_schema, schema_status]
+    )
+
     # Handle file upload preview
     def handle_upload_preview(file):
         preview_result = handle_file_preview(file)
         image_prev, pdf_prev, controls_visible, curr_page, tot_pages, pdf_path = preview_result
         
-        # Update page info display
-        page_info_html = f"<div style='text-align: center; padding: 8px;'>Page {curr_page + 1} of {tot_pages}</div>"
-        
-        return (image_prev, pdf_prev, gr.Column(visible=controls_visible), 
+        page_info_html = page_readout(current_page=curr_page, total_pages=tot_pages)
+
+        return (image_prev, pdf_prev, gr.Column(visible=controls_visible),
                page_info_html, curr_page, tot_pages, pdf_path)
     
     input_image.change(
@@ -107,7 +188,8 @@ def setup_event_handlers(
             input_image, use_textract, use_bedrock, use_bda,
             bedrock_model, bda_s3_bucket, s3_bucket,
             document_type, enable_structured_output, output_schema, use_bda_blueprint,
-            current_sample_name  # Pass the current sample name
+            current_sample_name,  # Pass the current sample name
+            textract_features, textract_queries
         ],
         outputs=output_components + [results_table]
     )
@@ -118,17 +200,39 @@ def setup_event_handlers(
         inputs=[
             use_textract, use_bedrock, use_bda,
             bedrock_model, bda_s3_bucket, s3_bucket,
-            document_type, enable_structured_output, output_schema, use_bda_blueprint
+            document_type, enable_structured_output, output_schema, use_bda_blueprint,
+            textract_features, textract_queries
         ],
         outputs=[global_status, results_table]
     )
     
-    # Add event handler for comparison view updates
+    # Narrow or widen the comparison table without re-processing anything: every
+    # engine's JSON is already on the page, so the filter is a pure re-render.
+    def filter_comparison_view(engine_filter, truth, textract, bedrock, bda):
+        """
+        Re-render the Compare tab for the selected filter
+
+        Args:
+            engine_filter: Selected value of the filter dropdown, one of
+                ENGINE_FILTER_CHOICES.
+            truth: Ground truth JSON currently held by the Truth tab, or None.
+            textract: Textract's extracted JSON, or None if it did not run.
+            bedrock: Bedrock's extracted JSON, or None if it did not run.
+            bda: BDA's extracted JSON, or None if it did not run.
+
+        Returns:
+            str: HTML for the comparison view.
+        """
+        return create_comparison_view(
+            truth_data=truth,
+            # Named rather than zipped against ENGINE_NAMES: create_comparison_view
+            # orders the columns itself, so nothing here depends on that order.
+            engine_json_by_name={
+                "Textract": textract, "Bedrock": bedrock, "BDA": bda},
+            engine_filter=engine_filter)
+
     diff_engine.change(
-        fn=lambda engine, truth, textract, bedrock, bda: create_diff_view(
-            truth or {}, 
-            {"Textract": textract, "Bedrock": bedrock, "BDA": bda}.get(engine, {}) or {}
-        ),
+        fn=filter_comparison_view,
         inputs=[diff_engine, truth_json, textract_json, bedrock_json, bda_json],
         outputs=comparison_view
     )

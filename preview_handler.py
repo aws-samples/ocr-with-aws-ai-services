@@ -2,8 +2,8 @@ import os
 import io
 import base64
 from PIL import Image
-import gradio as gr
 from shared.config import logger
+from shared.ui_theme import banner, note, page_readout
 
 # Try to import PDF processing libraries
 try:
@@ -24,9 +24,10 @@ def handle_file_preview(file):
         Tuple of (image_preview, pdf_preview, pdf_controls_visible, current_page, total_pages, pdf_path)
     """
     if file is None:
-        return (None, "<div style='text-align: center; padding: 50px; color: #666;'>Upload a file to see preview</div>", 
+        return (None, note(text="Upload a file to see a preview", tall=True),
                 False, 0, 1, None)
-    
+
+
     file_path = file.name if hasattr(file, 'name') else str(file)
     file_ext = os.path.splitext(file_path)[1].lower()
     
@@ -37,11 +38,11 @@ def handle_file_preview(file):
         try:
             image = Image.open(file_path)
             logger.info(f"Loaded image preview: {image.size}")
-            return (image, "<div style='text-align: center; padding: 50px; color: #666;'>Image preview shown above</div>", 
+            return (image, note(text="Image preview shown above"),
                    False, 0, 1, None)
         except Exception as e:
             logger.error(f"Error loading image preview: {str(e)}")
-            return (None, f"<div style='text-align: center; padding: 50px; color: #ff6b6b;'>Error loading image: {str(e)}</div>", 
+            return (None, banner(tone="error", text=f"Could not load image: {e}"),
                    False, 0, 1, None)
     
     elif file_ext == '.pdf':
@@ -64,11 +65,11 @@ def handle_file_preview(file):
             return (None, pdf_preview_html, False, 0, page_count, file_path)
         except Exception as e:
             logger.error(f"Error creating PDF preview: {str(e)}")
-            return (None, f"<div style='text-align: center; padding: 50px; color: #ff6b6b;'>Error loading PDF: {str(e)}</div>", 
+            return (None, banner(tone="error", text=f"Could not load PDF: {e}"),
                    False, 0, 1, None)
-    
+
     else:
-        return (None, f"<div style='text-align: center; padding: 50px; color: #666;'>File type {file_ext} not supported for preview</div>", 
+        return (None, note(text=f"No preview available for {file_ext} files", tall=True),
                False, 0, 1, None)
 
 def create_pdf_preview(pdf_path):
@@ -88,14 +89,19 @@ def create_pdf_preview(pdf_path):
             pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
             pdf_size = len(pdf_data) / 1024  # Size in KB
         
-        # Create HTML with simplified and more compatible PDF viewer
+        # This viewer frames a rendered PDF page, which is white, so its chrome stays
+        # light in both themes on purpose - a dark bezel around a white page reads as a
+        # rendering fault. Unlike the code this replaced it sets background AND text
+        # colour together, so it is self-consistent rather than dependent on the theme
+        # supplying a light background for it.
         html_content = f"""
-        <div style="width: 100%; height: 500px; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; background: white;">
-            <div style="background: #f5f5f5; padding: 8px; font-size: 14px; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center;">
-                <span>📄 PDF Preview - {os.path.basename(pdf_path)}</span>
-                <span style="font-size: 12px; color: #666;">{pdf_size:.1f} KB</span>
+        <div style="width: 100%; height: 500px; border: 1px solid #c8ccd4; border-radius: 8px; overflow: hidden; background: #ffffff; color: #1e293b;">
+            <div style="background: #eef1f5; color: #1e293b; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid #c8ccd4; display: flex; justify-content: space-between; align-items: center;">
+                <span>{os.path.basename(pdf_path)}</span>
+                <span style="font-size: 12px; opacity: 0.7;">{pdf_size:.1f} KB</span>
             </div>
-            
+
+
             <div style="height: 460px; width: 100%; position: relative;">
                 <iframe 
                     src="data:application/pdf;base64,{pdf_base64}#toolbar=1&navpanes=1&scrollbar=1" 
@@ -105,18 +111,16 @@ def create_pdf_preview(pdf_path):
                     title="PDF Preview">
                 </iframe>
                 
-                <div id="pdf-fallback" style="display: none; padding: 40px; text-align: center; height: 100%; box-sizing: border-box;">
-                    <div style="background: #f8f9fa; padding: 30px; border-radius: 8px; border: 2px dashed #dee2e6;">
-                        <h3 style="margin: 0 0 15px 0; color: #495057;">📄 PDF Document Loaded</h3>
-                        <p style="margin: 10px 0; color: #6c757d; font-size: 16px;">
-                            <strong>{os.path.basename(pdf_path)}</strong>
+                <div id="pdf-fallback" style="display: none; padding: 40px; text-align: center; height: 100%; box-sizing: border-box; background: #ffffff; color: #1e293b;">
+                    <div style="background: #f4f6f9; color: #1e293b; padding: 30px; border-radius: 8px; border: 1px dashed #a9b1bd;">
+                        <p style="margin: 0 0 12px 0; font-size: 15px; font-weight: 600;">
+                            {os.path.basename(pdf_path)}
                         </p>
-                        <p style="margin: 10px 0; color: #868e96;">
-                            Size: {pdf_size:.1f} KB
+                        <p style="margin: 6px 0; font-size: 13px; opacity: 0.75;">
+                            {pdf_size:.1f} KB · ready for OCR processing
                         </p>
-                        <p style="margin: 20px 0 0 0; color: #adb5bd; font-size: 14px;">
-                            PDF is ready for OCR processing.<br>
-                            Preview not available in this browser.
+                        <p style="margin: 16px 0 0 0; font-size: 13px; opacity: 0.75;">
+                            This browser cannot display an embedded PDF.
                         </p>
                     </div>
                 </div>
@@ -142,12 +146,7 @@ def create_pdf_preview(pdf_path):
         
     except Exception as e:
         logger.error(f"Error creating PDF preview: {str(e)}")
-        return f"""
-        <div style='text-align: center; padding: 50px; color: #ff6b6b; border: 1px solid #ddd; border-radius: 8px;'>
-            <p>❌ Error creating PDF preview</p>
-            <p style="font-size: 12px; color: #999;">{str(e)}</p>
-        </div>
-        """
+        return banner(tone="error", text=f"Could not create a PDF preview: {e}")
 
 def convert_pdf_to_image(pdf_path, page_num=0, dpi=150):
     """
@@ -228,23 +227,20 @@ def create_pdf_info_html(pdf_path, current_page=0, total_pages=1):
     """
     try:
         file_size = os.path.getsize(pdf_path) / 1024  # Size in KB
-        
+
         return f"""
-        <div style='text-align: center; padding: 20px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; margin-top: 10px;'>
-            <h4 style='margin: 0 0 10px 0; color: #495057;'>📄 PDF Document Info</h4>
-            <p style='margin: 5px 0; color: #6c757d;'><strong>File:</strong> {os.path.basename(pdf_path)}</p>
-            <p style='margin: 5px 0; color: #6c757d;'><strong>Size:</strong> {file_size:.1f} KB</p>
-            <p style='margin: 5px 0; color: #6c757d;'><strong>Pages:</strong> {total_pages}</p>
-            <p style='margin: 10px 0 0 0; font-size: 14px; color: #868e96;'>Showing page {current_page + 1} of {total_pages}</p>
+        <div class='ocr-card'>
+            <h4 class='ocr-card__title'>PDF document</h4>
+            <p class='ocr-card__row'><span>File</span><span>{os.path.basename(pdf_path)}</span></p>
+            <p class='ocr-card__row'><span>Size</span><span>{file_size:.1f} KB</span></p>
+            <p class='ocr-card__row'><span>Pages</span><span>{total_pages}</span></p>
+            <p class='ocr-card__footer'>Showing page {current_page + 1} of {total_pages}</p>
         </div>
         """
-        
+
     except Exception as e:
-        return f"""
-        <div style='text-align: center; padding: 20px; color: #6c757d;'>
-            📄 PDF loaded successfully
-        </div>
-        """
+        logger.error(f"Could not read PDF metadata for {pdf_path}: {e}")
+        return note(text="PDF loaded; document details unavailable")
 
 def navigate_pdf_page(pdf_path, page_num, total_pages):
     """
@@ -259,44 +255,32 @@ def navigate_pdf_page(pdf_path, page_num, total_pages):
         Tuple of (image, info_html, page_info_html)
     """
     if not pdf_path or not os.path.exists(pdf_path):
-        return None, "PDF not found", "<div>Page 1 of 1</div>"
-    
+        return (None, banner(tone="error", text="PDF not found"),
+                page_readout(current_page=0, total_pages=1))
+
     # Ensure page number is within bounds
     page_num = max(0, min(page_num, total_pages - 1))
-    
+    page_info_html = page_readout(current_page=page_num, total_pages=total_pages)
+
     try:
         if HAS_PYMUPDF:
             pdf_image = convert_pdf_to_image(pdf_path, page_num=page_num)
             if pdf_image:
                 info_html = create_pdf_info_html(pdf_path, page_num, total_pages)
-                page_info_html = f"<div style='text-align: center; padding: 8px;'>Page {page_num + 1} of {total_pages}</div>"
                 return pdf_image, info_html, page_info_html
-        
+
         # Fallback
-        page_info_html = f"<div style='text-align: center; padding: 8px;'>Page {page_num + 1} of {total_pages}</div>"
-        return None, "Page navigation not available", page_info_html
-        
+        return None, note(text="Page navigation needs PyMuPDF"), page_info_html
+
     except Exception as e:
         logger.error(f"Error navigating PDF page: {str(e)}")
-        return None, f"Error loading page: {str(e)}", "<div>Error</div>"
+        return (None, banner(tone="error", text=f"Could not load page: {e}"),
+                page_info_html)
 
-def handle_sample_preview(sample_path):
-    """
-    Handle preview for sample images
-    
-    Args:
-        sample_path: Path to the sample image
-        
-    Returns:
-        Tuple of (image_preview, pdf_preview, image_visible, pdf_visible)
-    """
-    if not sample_path or not os.path.exists(sample_path):
-        return None, "<div style='text-align: center; padding: 50px; color: #666;'>No sample selected</div>", True, False
-    
-    try:
-        image = Image.open(sample_path)
-        logger.info(f"Loaded sample image preview: {sample_path}")
-        return image, "<div style='text-align: center; padding: 50px; color: #666;'>Sample image preview</div>", True, False
-    except Exception as e:
-        logger.error(f"Error loading sample preview: {str(e)}")
-        return None, f"<div style='text-align: center; padding: 50px; color: #ff6b6b;'>Error loading sample: {str(e)}</div>", True, False
+# handle_sample_preview() used to live here. It only called Image.open(), so it could
+# not preview a PDF sample, and it duplicated handle_file_preview(): selecting a sample
+# assigns the resolved path to the input_image File component, and Gradio's .change()
+# fires on programmatic updates too, so handle_file_preview() ran immediately
+# afterwards and overwrote its output. Sample selection now leaves previewing entirely
+# to the input_image.change handler, which is also the only one that sets up the PDF
+# page-navigation state.

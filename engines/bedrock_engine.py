@@ -1,17 +1,23 @@
 import time
 import json
-import base64
 import os
 import tempfile
-import shutil
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import ImageDraw
 from typing import Dict, Any, Tuple, Optional
 
 from engines.base import OCREngine
-from shared.aws_client import get_aws_client
+from shared.aws_client import get_aws_client, describe_credential_error
 from shared.image_utils import convert_to_bytes
-from shared.config import logger, API_COSTS, MAX_IMAGE_SIZE
+from shared.config import (
+    logger,
+    API_COSTS,
+    MAX_IMAGE_SIZE,
+    LLM_MAX_OUTPUT_TOKENS,
+    MANTLE_MODEL_IDS,
+)
+from shared.mantle_client import invoke_mantle_responses
+from shared.pdf_render import compose_pdf_visualisation, count_pdf_pages
 from shared.prompt_manager import get_prompt_for_document_type, get_json_formatting_instructions, OCR_SYSTEM_PROMPT
 
 class BedrockEngine(OCREngine):
@@ -90,105 +96,101 @@ class BedrockEngine(OCREngine):
         with timing_ctx:
             
             try:
+                # The bedrock-mantle models are not a boto3 service at all - botocore
+                # ships no service model for that endpoint - so no client is built for
+                # them and the call goes through shared.mantle_client instead.
+                is_mantle_model = model_id in MANTLE_MODEL_IDS
+
                 # Create Bedrock Runtime client
-                bedrock_runtime = get_aws_client('bedrock-runtime')
-                
+                bedrock_runtime = None if is_mantle_model else get_aws_client('bedrock-runtime')
+
                 # Get appropriate prompt based on document type
                 prompt = get_prompt_for_document_type(document_type)
                 prompt += get_json_formatting_instructions(output_schema)
                 system_prompt = OCR_SYSTEM_PROMPT
-                    
+
                 # Create request payload based on file type
-                if is_pdf:
-                    # For PDF files, use invoke_model API
-                    pdf_base64 = base64.b64encode(file_bytes).decode('utf-8')
-                    
-                    # Create request body for invoke_model (no citations, no cache)
-                    request_body = {
-                        "anthropic_version": "bedrock-2023-05-31",
-                        "max_tokens": 4000,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "document",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": "application/pdf",
-                                            "data": pdf_base64
-                                        }
-                                    },
-                                    {
-                                        "type": "text",
-                                        "text": prompt
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                    
-                    # Add system prompt if provided
-                    if system_prompt:
-                        request_body["system"] = system_prompt
-                    
-                    # Use invoke_model for PDF
-                    response = bedrock_runtime.invoke_model(
-                        modelId=model_id,
-                        body=json.dumps(request_body),
-                        contentType='application/json',
-                        accept='application/json'
+                if is_mantle_model:
+                    # One request shape covers both PDFs and images here, because the
+                    # Responses API distinguishes them by content-block type rather
+                    # than by API operation the way bedrock-runtime does.
+                    mantle_result = invoke_mantle_responses(
+                        model_id=model_id,
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        max_output_tokens=LLM_MAX_OUTPUT_TOKENS,
+                        pdf_bytes=file_bytes if is_pdf else None,
+                        # Unlike Converse, the Responses API wants an actual filename,
+                        # so the extension is added back on here.
+                        pdf_filename=f"{self._sanitize_document_name(image)}.pdf",
+                        image_bytes=None if is_pdf else image_bytes,
                     )
-                    
-                    # Parse invoke_model response
-                    response_body = json.loads(response['body'].read())
-                    
-                    # Extract text from invoke_model response
-                    extracted_text = ""
-                    for block in response_body.get('content', []):
-                        if block.get('type') == 'text':
-                            extracted_text += block.get('text', '')
-                    
-                    # Extract token usage for invoke_model
-                    usage = response_body.get('usage', {})
-                    token_usage = {
-                        'inputTokens': usage.get('input_tokens', 0),
-                        'outputTokens': usage.get('output_tokens', 0),
-                        'totalTokens': usage.get('input_tokens', 0) + usage.get('output_tokens', 0)
-                    }
-                    
-                    logger.info(f"PDF processed with invoke_model - Input: {token_usage['inputTokens']}, Output: {token_usage['outputTokens']}")
-                    
+
+                    extracted_text = self._strip_json_code_fence(
+                        text=mantle_result["text"])
+                    token_usage = mantle_result["token_usage"]
+
+                    # Reasoning tokens are charged against max_output_tokens, so
+                    # these models can exhaust the budget before emitting any text.
+                    # Truncation is reported as an incomplete status rather than a
+                    # stop reason; mantle_client normalises it to this field.
+                    self._raise_if_truncated(stop_reason=mantle_result["stop_reason"])
+
                 else:
-                    # For images, use converse API
+                    # Converse for both PDFs and images.
+                    #
+                    # PDFs used to go through invoke_model with a native Anthropic
+                    # body ("anthropic_version", a base64 "document" content block).
+                    # That request is only valid for the Claude models: Nova rejects
+                    # it outright with "extraneous key [type] is not permitted", so
+                    # every non-Claude model in BEDROCK_MODELS failed on any PDF -
+                    # which is the whole sample set in this repo. Converse takes one
+                    # request shape for every model on bedrock-runtime, so the
+                    # document block below works for all of them.
+                    if is_pdf:
+                        # Converse takes raw bytes, not base64, and requires a name.
+                        # Bedrock restricts that name to alphanumerics, whitespace,
+                        # hyphens, parentheses and brackets, hence the sanitising.
+                        document_block = {
+                            "document": {
+                                "format": "pdf",
+                                "name": self._sanitize_document_name(image),
+                                "source": {"bytes": file_bytes}
+                            }
+                        }
+                    else:
+                        # convert_to_bytes() always encodes JPEG.
+                        document_block = {
+                            "image": {
+                                "format": "jpeg",
+                                "source": {"bytes": image_bytes}
+                            }
+                        }
+
                     messages = [
                         {
                             "role": "user",
                             "content": [
-                                {
-                                    "text": prompt
-                                },
-                                {
-                                    "image": {
-                                        "format": "jpeg",
-                                        "source": {
-                                            "bytes": image_bytes
-                                        }
-                                    }
-                                }
+                                {"text": prompt},
+                                document_block
                             ]
                         }
                     ]
-                    
+
                     # Call the converse API with system messages (no citations or cache)
                     converse_args = {
                         "modelId": model_id,
                         "messages": messages,
-                        "system": [{"text": system_prompt}]
+                        "system": [{"text": system_prompt}],
+                        # Converse caps output at 4096 tokens when inferenceConfig is
+                        # omitted and truncates mid-string without raising. This one
+                        # call does OCR and JSON structuring for the whole document,
+                        # so its output is the largest the app produces.
+                        "inferenceConfig": {"maxTokens": LLM_MAX_OUTPUT_TOKENS}
                     }
-                    
+
                     response = bedrock_runtime.converse(**converse_args)
-                    
+
                     # Extract text from converse response
                     extracted_text = ""
                     
@@ -200,6 +202,9 @@ class BedrockEngine(OCREngine):
                     }
                     
                     logger.info(f"Token usage - Input: {token_usage['inputTokens']}, Output: {token_usage['outputTokens']}, Total: {token_usage['totalTokens']}")
+
+                    # Converse spells the same signal in camelCase.
+                    self._raise_if_truncated(stop_reason=response.get('stopReason'))
                     
                     # Process response according to the provided format
                     if 'output' in response and 'message' in response['output']:
@@ -207,29 +212,36 @@ class BedrockEngine(OCREngine):
                         if 'content' in message:
                             for content_item in message['content']:
                                 if 'text' in content_item:
-                                    text = content_item['text']
-                                    # Remove any markdown code block wrapping
-                                    text = text.strip()
-                                    if text.startswith("```json"):
-                                        text = text[7:]
-                                    if text.startswith("```"):
-                                        text = text[3:]
-                                    if text.endswith("```"):
-                                        text = text[:-3]
-                                    extracted_text += text.strip()
+                                    extracted_text += self._strip_json_code_fence(
+                                        text=content_item['text'])
                 
                 # Create visual annotation based on file type
                 if is_pdf:
-                    # For PDF files, create a simple placeholder image
-                    annotated_image = np.zeros((400, 600, 3), dtype=np.uint8)
-                    from PIL import Image as PILImage, ImageDraw as PILImageDraw
-                    pil_img = PILImage.fromarray(annotated_image)
-                    draw = PILImageDraw.Draw(pil_img)
-                    model_name = model_id.split(':')[0].split('.')[-1].upper()
-                    draw.text((20, 20), f"PDF Processed with {model_name}", fill=(0, 204, 255))
-                    draw.text((20, 50), f"Document Type: {document_type}", fill=(0, 204, 255))
-                    annotated_image = np.array(pil_img)
+                    # Render the real pages rather than the 400x600 black rectangle
+                    # this used to draw. No boxes are passed because Converse
+                    # returns none: its response content is text and tool-use
+                    # only, with no geometry field anywhere in the API. Passing an
+                    # empty list makes the captions read "Page n of N" with no box
+                    # count, so nothing implies boxes were looked for and missed.
+                    try:
+                        page_count = count_pdf_pages(pdf_bytes=file_bytes)
+                    except ValueError as count_error:
+                        # The extraction has already succeeded and been paid for, so
+                        # an unreadable page tree must not discard it. 0 means
+                        # "unknown" to the results table, which leaves the per-page
+                        # cells blank rather than claiming one page was read.
+                        # Bedrock is billed per token, so no charge is misstated.
+                        logger.error(
+                            f"Could not count the PDF's pages, so per-page figures "
+                            f"will be blank: {count_error}")
+                        page_count = 0
+                    annotated_image = np.array(
+                        compose_pdf_visualisation(
+                            pdf_bytes=file_bytes, boxes=[], item_noun="text lines"
+                        )
+                    )
                 else:
+                    page_count = 1
                     # Create a visual indicator on the image
                     annotated_img_copy = img_pil.copy()
                     draw = ImageDraw.Draw(annotated_img_copy)
@@ -281,13 +293,16 @@ class BedrockEngine(OCREngine):
                     "process_time": overall_process_time,
                     "token_usage": token_usage,
                     "model_id": model_id,
-                    "pages": 1,
+                    "pages": page_count,
                     "operation_type": "bedrock",
                     "file_type": "pdf" if is_pdf else "image"
                 }
                 
             except Exception as e:
-                logger.error(f"Error in Bedrock processing: {str(e)}")
+                # Credential failures are reported by botocore without naming the
+                # profile at fault, which is the one thing the user needs to know.
+                error_message = describe_credential_error(e) or str(e)
+                logger.error(f"Error in Bedrock processing: {error_message}")
                 overall_process_time = time.time() - overall_start_time
                 logger.info(f"Bedrock error processing time: {overall_process_time:.2f} seconds")
                 
@@ -300,7 +315,7 @@ class BedrockEngine(OCREngine):
                         logger.warning(f"Failed to clean up temporary PDF after error: {cleanup_error}")
                 
                 return {
-                    "text": f"Amazon Bedrock Error: {str(e)}",
+                    "text": f"Amazon Bedrock Error: {error_message}",
                     "json": None,
                     "image": None,
                     "process_time": overall_process_time,
@@ -353,6 +368,61 @@ class BedrockEngine(OCREngine):
         # Return both the HTML and the actual cost value
         return html, total_cost
     
+    @staticmethod
+    def _strip_json_code_fence(*, text: str) -> str:
+        """
+        Remove a markdown code fence wrapping a model's JSON response
+
+        Models routinely return JSON inside a ```json ... ``` block despite being
+        asked for JSON only, and json.loads() rejects the fence.
+
+        Args:
+            text (str): One text block from a model response.
+
+        Returns:
+            str: The block with any surrounding fence and whitespace removed.
+        """
+        stripped = text.strip()
+        if stripped.startswith("```json"):
+            stripped = stripped[7:]
+        if stripped.startswith("```"):
+            stripped = stripped[3:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3]
+        return stripped.strip()
+
+    # The two APIs spell a hit output limit differently: Converse reports 'max_tokens'
+    # as 'stopReason', and the Mantle Responses API reports 'max_output_tokens' as
+    # incomplete_details.reason.
+    TRUNCATED_STOP_REASONS = frozenset({'max_tokens', 'max_output_tokens'})
+
+    def _raise_if_truncated(self, stop_reason: Optional[str]) -> None:
+        """
+        Fail loudly when the model's response was cut off at the output limit
+
+        A truncated response is not valid JSON, but the only symptom downstream is a
+        parse error on an unterminated string, which reads as a model quality problem
+        rather than a configuration one.
+
+        Args:
+            stop_reason: The API's stop reason, or None when it did not report one
+
+        Returns:
+            None
+
+        Raises:
+            ValueError: If the response was truncated at the output limit
+        """
+        if stop_reason not in self.TRUNCATED_STOP_REASONS:
+            return
+
+        raise ValueError(
+            f"The model hit the {LLM_MAX_OUTPUT_TOKENS}-token output limit and its "
+            f"response was truncated, so the extracted text is incomplete and any "
+            f"JSON in it is invalid. Raise OCR_LLM_MAX_OUTPUT_TOKENS, or process "
+            f"fewer pages at a time."
+        )
+
     def _is_pdf_input(self, image):
         """Check if input is a PDF file"""
         if hasattr(image, 'name') and image.name and image.name.lower().endswith('.pdf'):
@@ -385,59 +455,57 @@ class BedrockEngine(OCREngine):
             logger.error(f"Failed to create temporary PDF: {str(e)}")
             raise Exception(f"Failed to create temporary PDF: {str(e)}")
     
-    def _sanitize_document_name(self, image):
+    def _sanitize_document_name(self, image) -> str:
         """
-        Sanitize document name to meet Bedrock requirements:
-        - Only alphanumeric characters, whitespace, hyphens, parentheses, and square brackets
-        - No more than one consecutive whitespace character
+        Derive a Bedrock-legal document name from the input file's own name
+
+        Converse requires a name on every document block and restricts it to
+        alphanumerics, whitespace, hyphens, parentheses and square brackets, with no
+        two consecutive whitespace characters. The name is not a filename and carries
+        no extension: a period is not in the permitted set, so returning
+        "claim-form.pdf" is rejected outright. This method used to append ".pdf" and
+        was never called, so that was never discovered.
+
+        The model is shown this name, so it is derived from the document's real name
+        rather than being a fixed placeholder.
+
+        Args:
+            image: The engine's input - a file object with a `.name`, a path string,
+                or anything else, in which case a generic name is used.
+
+        Returns:
+            str: A name Bedrock accepts, never empty.
         """
         import re
         import os
-        
+
         # Get original filename
         original_name = None
         if hasattr(image, 'name') and image.name:
             original_name = os.path.basename(image.name)
-            logger.info(f"Original filename from image.name: {original_name}")
         elif isinstance(image, str) and image:
             original_name = os.path.basename(image)
-            logger.info(f"Original filename from string: {original_name}")
-        
-        # If no valid filename found, use default
-        if not original_name or not original_name.strip():
-            logger.info("No valid filename found, using default")
-            return "document.pdf"
-        
-        # Remove file extension for processing
-        name_without_ext = os.path.splitext(original_name)[0]
-        logger.info(f"Name without extension: '{name_without_ext}'")
-        
-        # If name without extension is empty, use default
-        if not name_without_ext or not name_without_ext.strip():
-            logger.info("Name without extension is empty, using default")
-            return "document.pdf"
-        
-        # Replace invalid characters with spaces or hyphens
-        # Keep only alphanumeric, whitespace, hyphens, parentheses, and square brackets
-        # Convert underscores and dots to hyphens, other invalid chars to spaces
-        sanitized = re.sub(r'[_\.]', '-', name_without_ext)  # Convert _ and . to -
-        sanitized = re.sub(r'[^a-zA-Z0-9\s\-\(\)\[\]]', ' ', sanitized)  # Convert other invalid chars to space
-        
-        # Replace multiple consecutive whitespace with single space
+
+        # Strip the extension: its period is not a permitted character, and the model
+        # has the document itself, so the format adds nothing.
+        name_without_ext = os.path.splitext(original_name or "")[0]
+        if not name_without_ext.strip():
+            return "document"
+
+        # Convert underscores and periods to hyphens, and anything else outside the
+        # permitted set to a space.
+        sanitized = re.sub(r'[_\.]', '-', name_without_ext)
+        sanitized = re.sub(r'[^a-zA-Z0-9\s\-\(\)\[\]]', ' ', sanitized)
+
+        # Collapse runs of whitespace - two in a row is rejected - and of hyphens.
         sanitized = re.sub(r'\s+', ' ', sanitized)
-        
-        # Replace multiple consecutive hyphens with single hyphen
         sanitized = re.sub(r'-+', '-', sanitized)
-        
-        # Trim whitespace and hyphens from start and end
+
+        # A leading or trailing separator is legal but reads as a truncated name.
         sanitized = sanitized.strip(' -')
-        
-        # If name is empty after sanitization, use default
+
         if not sanitized:
-            logger.info("Name is empty after sanitization, using default")
-            sanitized = "document"
-        
-        # Add .pdf extension back
-        final_name = f"{sanitized}.pdf"
-        logger.info(f"Final sanitized document name: '{final_name}'")
-        return final_name
+            return "document"
+
+        logger.info(f"Bedrock document name: '{sanitized}'")
+        return sanitized

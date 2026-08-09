@@ -1,0 +1,108 @@
+{
+  "requestPartA": {
+    "employeeName": "Marisol Ndiaye-Craft",
+    "claimNumber": "SYN-4410772",
+    "employeeCity": "Rensselaer",
+    "employeeState": "NY",
+    "employeeZipCode": "12144",
+    "gender": "F",
+    "preferredLanguage": "English",
+    "race": "Black or African American",
+    "reasonForRequest": "Bond with child",
+    "familyMemberRelationship": "Child",
+    "leaveScheduleType": "Continuous",
+    "leaveStartDate": "2025-06-02",
+    "leaveEndDate": "2025-08-24",
+    "datesAreEstimated": true,
+    "employeeDateOfHire": "2022-04-11",
+    "hasMoreThanOneEmployer": "No",
+    "takingLeaveFromOtherEmployer": "No",
+    "receivingWorkersCompensation": "No",
+    "employeeSignatureDate": "2025-05-19"
+  },
+  "requestPartB": {
+    "employerName": "Halberd Ceramics Co-operative",
+    "employerFein": "27-3319845",
+    "employerDateOfHire": "2022-04-18",
+    "occupationCode": "43-4051",
+    "grossWages": [
+      {
+        "weekNumber": 1,
+        "weekEndingDate": "2025-05-11",
+        "numberOfDaysWorked": 5,
+        "grossAmountPaid": 1412.55
+      },
+      {
+        "weekNumber": 2,
+        "weekEndingDate": "2025-05-04",
+        "numberOfDaysWorked": 5,
+        "grossAmountPaid": 1388.2
+      },
+      {
+        "weekNumber": 3,
+        "weekEndingDate": "2025-04-27",
+        "numberOfDaysWorked": 5,
+        "grossAmountPaid": 1502.9
+      },
+      {
+        "weekNumber": 4,
+        "weekEndingDate": "2025-04-20",
+        "numberOfDaysWorked": 4,
+        "grossAmountPaid": 1344.75
+      },
+      {
+        "weekNumber": 5,
+        "weekEndingDate": "2025-04-13",
+        "numberOfDaysWorked": 5,
+        "grossAmountPaid": 1476.3
+      },
+      {
+        "weekNumber": 6,
+        "weekEndingDate": "2025-04-06",
+        "numberOfDaysWorked": 5,
+        "grossAmountPaid": 1412.55
+      },
+      {
+        "weekNumber": 7,
+        "weekEndingDate": "2025-03-30",
+        "numberOfDaysWorked": null,
+        "grossAmountPaid": 1399.05
+      },
+      {
+        "weekNumber": 8,
+        "weekEndingDate": "2025-03-23",
+        "numberOfDaysWorked": 5,
+        "grossAmountPaid": 1455.4
+      }
+    ],
+    "calculatedAverageGrossWeeklyWage": 1423.96,
+    "requestingReimbursement": "No",
+    "leaveTakenInPreceding52Weeks": "None",
+    "takingFmlaConcurrently": "Yes",
+    "employerSignatureDate": "2025-05-22",
+    "employerTitle": "Benefits Administrator",
+    "insuranceCarrier": {
+      "name": "Pemberton Mutual Assurance",
+      "streetAddress": "PO Box 88214",
+      "city": "Watervliet",
+      "state": "NY",
+      "zipCode": "12189-0214"
+    }
+  },
+  "bondingCertification": {
+    "childName": "Amaia Ndiaye-Craft",
+    "childDateOfBirth": "2025-05-31",
+    "childGender": "F",
+    "childLivesWithEmployee": "Yes",
+    "relationshipToChild": "Biological child",
+    "documentationAttached": "Health care provider certification of birth",
+    "employeeSignatureDate": "2025-05-19"
+  },
+  "paymentEnrollment": {
+    "policyNumber": "PMA-NY-660184",
+    "carrierTelephoneNumber": "(800) 447-2210",
+    "paymentMethod": "Direct deposit",
+    "accountType": "Checking",
+    "bankRoutingNumberLastFour": "0119"
+  }
+}

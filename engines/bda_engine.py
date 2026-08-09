@@ -1,16 +1,30 @@
-import os
 import json
 import uuid
 import time
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import ImageDraw
 from typing import Dict, Any, Tuple, Optional, List
 
 from engines.base import OCREngine
-from shared.aws_client import get_aws_client, get_account_id, get_current_region
+from shared.aws_client import (
+    get_aws_client,
+    get_account_id,
+    get_current_region,
+    describe_credential_error,
+)
 from shared.image_utils import convert_to_bytes
-from shared.config import logger, API_COSTS
+from shared.config import logger, API_COSTS, POSTPROCESSING_MODEL
 from shared.prompt_manager import process_text_with_llm
+from shared.blueprint_schema import (
+    BlueprintBuild,
+    build_blueprint_schema,
+    restore_nested_result,
+)
+from shared.pdf_render import (
+    PageBox,
+    boxes_from_bda_explainability,
+    compose_pdf_visualisation,
+)
 
 class BDAEngine(OCREngine):
     """
@@ -69,80 +83,140 @@ class BDAEngine(OCREngine):
         """
         return self._process_with_bda(image, s3_bucket, document_type, output_schema, use_blueprint=False, is_pdf=is_pdf)
     
-    def _convert_schema_to_blueprint_format(self, schema_json_str, document_type="generic"):
+    def _convert_schema_to_blueprint_format(
+        self, schema_json_str, document_type: str = "generic"
+    ) -> Optional[BlueprintBuild]:
         """
-        Convert a JSON schema into BDA blueprint format
-        
+        Translate an output schema into a BDA blueprint.
+
         Args:
-            schema_json_str: JSON schema as string or dictionary
-            document_type: Document type for the blueprint
-            
+            schema_json_str: JSON schema as a string or a dictionary
+            document_type: Document type recorded on the blueprint
+
         Returns:
-            Blueprint schema dictionary or None if error
+            A BlueprintBuild carrying the blueprint schema and the field map
+            needed to restore the result's nested shape, or None on error.
         """
         try:
-            if isinstance(schema_json_str, str):
-                schema = json.loads(schema_json_str)
-            else:
-                schema = schema_json_str
-                
-            blueprint = {
-                "$schema": "http://json-schema.org/draft-07/schema#",
-                "description": f"{document_type.capitalize()} document schema",
-                "class": document_type,
-                "type": "object",
-                "properties": {}
-            }
-            
-            if "properties" in schema:
-                for prop_name, prop_value in schema["properties"].items():
-                    if prop_value.get("type") in ["string", "number", "boolean", "integer"]:
-                        blueprint["properties"][prop_name] = {
-                            "type": prop_value.get("type", "string"),
-                            "inferenceType": "explicit",
-                            "instruction": prop_value.get("description", f"Extract the {prop_name}")
-                        }
-                    
-                    elif prop_value.get("type") == "array" and "items" in prop_value:
-                        items = prop_value["items"]
-                        
-                        blueprint["properties"][prop_name] = {
-                            "type": "string",
-                            "inferenceType": "explicit",
-                            "instruction": f"Extract all {prop_name} items"
-                        }
-                        
-                        if items.get("type") == "object" and "properties" in items:
-                            for item_key, item_value in items["properties"].items():
-                                field_name = f"{prop_name}_{item_key}"
-                                blueprint["properties"][field_name] = {
-                                    "type": self._get_simple_type(item_value.get("type", "string")),
-                                    "inferenceType": "explicit",
-                                    "instruction": item_value.get("description", f"Extract {item_key} for all {prop_name}")
-                                }
-                    
-                    elif prop_value.get("type") == "object" and "properties" in prop_value:
-                        for obj_key, obj_value in prop_value["properties"].items():
-                            field_name = f"{prop_name}_{obj_key}"
-                            blueprint["properties"][field_name] = {
-                                "type": self._get_simple_type(obj_value.get("type", "string")),
-                                "inferenceType": "explicit",
-                                "instruction": obj_value.get("description", f"Extract {obj_key} from {prop_name}")
-                            }
-            
-            return blueprint
+            return build_blueprint_schema(
+                schema=schema_json_str, document_type=document_type
+            )
         except Exception as e:
             logger.error(f"Error converting schema: {str(e)}")
             return None
-    
-    def _get_simple_type(self, type_value):
+
+    def _describe_blueprint(self, *, build: BlueprintBuild) -> str:
         """
-        Convert complex types to simple types for BDA blueprint
+        Render a blueprint's fields as readable text for the results panel.
+
+        Groups and tables are shown with their sub-fields indented beneath them,
+        and any field that had to be hoisted out of its parent is named, so the
+        panel reflects the shape BDA was actually asked for.
+
+        Args:
+            build: The translated blueprint.
+
+        Returns:
+            A text block listing every extraction field.
         """
-        if type_value in ["string", "number", "boolean", "integer"]:
-            return type_value
-        return "string"
-    
+        definitions = build.schema.get("definitions", {})
+
+        def sub_fields(*, ref: str) -> Dict[str, Any]:
+            """
+            Resolve a `$ref` pointer to the properties it names.
+
+            Args:
+                ref: A `#/definitions/Name` pointer.
+
+            Returns:
+                The referenced properties, empty if the pointer is unknown.
+            """
+            name = ref.rsplit("/", 1)[-1]
+            return definitions.get(name, {}).get("properties", {})
+
+        lines = [f"Extraction Fields ({build.field_count} billable):\n"]
+
+        for prop_name, prop in build.schema["properties"].items():
+            original_path = ".".join(build.field_map.get(prop_name, (prop_name,)))
+            shown_name = (
+                prop_name if original_path == prop_name
+                else f"{prop_name}  (extracted for {original_path})"
+            )
+
+            if "$ref" in prop:
+                lines.append(f"• {shown_name} (group)")
+                if prop.get("instruction"):
+                    lines.append(f"  - {prop['instruction']}")
+                for child_name, child in sub_fields(ref=prop["$ref"]).items():
+                    lines.append(f"    · {child_name} ({child.get('type', 'string')})")
+                    if child.get("instruction"):
+                        lines.append(f"      - {child['instruction']}")
+
+            elif prop.get("type") == "array" and "$ref" in prop.get("items", {}):
+                lines.append(f"• {shown_name} (table)")
+                if prop.get("instruction"):
+                    lines.append(f"  - {prop['instruction']}")
+                for column_name, column in sub_fields(ref=prop["items"]["$ref"]).items():
+                    lines.append(
+                        f"    · {column_name} ({column.get('type', 'string')})"
+                    )
+                    if column.get("instruction"):
+                        lines.append(f"      - {column['instruction']}")
+
+            else:
+                lines.append(f"• {shown_name} ({prop.get('type', 'string')})")
+                if prop.get("instruction"):
+                    lines.append(f"  - {prop['instruction']}")
+
+        if build.hoisted_paths:
+            # BDA blueprints allow one level of nesting, so these fields could not
+            # stay where the schema puts them. Saying so keeps the difference
+            # between the blueprint and the schema visible.
+            hoisted = ", ".join(".".join(path) for path in build.hoisted_paths)
+            lines.append(
+                f"\nExtracted as separate top-level fields because BDA blueprints "
+                f"support one level of nesting: {hoisted}.\n"
+                f"These are put back in place before the result is compared."
+            )
+
+        return "\n".join(lines) + "\n"
+
+    def _restore_blueprint_json(
+        self, *, custom_output: Dict[str, Any], build: Optional[BlueprintBuild]
+    ) -> Dict[str, Any]:
+        """
+        Put a blueprint's result back into the shape the output schema declares.
+
+        BDA returns one top-level key per blueprint field. Groups and tables come
+        back already shaped, but a field hoisted out of its parent - because BDA
+        blueprints support only one level of nesting - comes back at the top
+        level. Ground truth is nested, so a result left in the returned shape
+        matches nothing and scores 0% however good the extraction was.
+
+        The `inference_result` wrapper is dropped here for the same reason: it is
+        one extra level that no truth key can match.
+
+        Args:
+            custom_output: The custom output object from BDA.
+            build: The translated blueprint, whose field map says where each
+                returned key belongs. None when the blueprint was not built by
+                this engine, in which case the result is returned as-is.
+
+        Returns:
+            The result nested as the output schema declares it.
+        """
+        inference_result = custom_output['inference_result']
+
+        if build is None:
+            logger.warning(
+                "No blueprint field map is available, so the BDA result cannot be "
+                "restored to the schema's nested shape and will be compared flat")
+            return inference_result
+
+        return restore_nested_result(
+            inference_result=inference_result, field_map=build.field_map
+        )
+
     def _process_with_bda(self, image, s3_bucket=None, document_type="generic", output_schema=None, use_blueprint=True, is_pdf=False):
         """
         Process image or PDF with Amazon BDA
@@ -190,15 +264,19 @@ class BDAEngine(OCREngine):
                 account_id = get_account_id()
                 current_region = get_current_region()
                 
-                # Validate S3 bucket
+                # Validate S3 bucket.
+                #
+                # Raised rather than returned: the early return here produced a
+                # result with neither "operation_type": "error" nor a page count,
+                # so the caller read a bucket misconfiguration as a successful run
+                # that had somehow processed zero pages. Raising routes it through
+                # the handler below, which is the only place that shapes an error.
                 try:
                     s3_client.head_bucket(Bucket=s3_bucket)
                 except Exception as e:
-                    logger.error(f"S3 bucket {s3_bucket} does not exist or is not accessible: {e}")
-                    return {
-                        "text": f"Error: S3 bucket '{s3_bucket}' does not exist or is not accessible", 
-                        "process_time": timing_ctx.process_time
-                    }
+                    raise RuntimeError(
+                        f"S3 bucket '{s3_bucket}' does not exist or is not "
+                        f"accessible: {e}") from e
                 
                 # Upload file to S3
                 timestamp = int(time.time())
@@ -227,13 +305,14 @@ class BDAEngine(OCREngine):
                 
                 # Create and manage blueprint if needed
                 blueprint_arn = None
-                blueprint_schema = None
+                blueprint_build = None
                 blueprint_info = "No custom blueprint was used"
                 field_count = 0
-                
+
                 if use_blueprint and output_schema:
-                    blueprint_schema = self._convert_schema_to_blueprint_format(output_schema, document_type)
-                    if blueprint_schema:
+                    blueprint_build = self._convert_schema_to_blueprint_format(output_schema, document_type)
+                    if blueprint_build:
+                        blueprint_schema = blueprint_build.schema
                         blueprint_name = f"ocr-{document_type}-{random_id}"
                         logger.info(f"Creating blueprint: {blueprint_name}")
                         
@@ -248,21 +327,15 @@ class BDAEngine(OCREngine):
                         logger.info(f"Created blueprint: {blueprint_arn}")
                         
                         # Format blueprint information for display
-                        blueprint_info = f"Blueprint Configuration:\n\n"
+                        blueprint_info = "Blueprint Configuration:\n\n"
                         blueprint_info += f"Name: {blueprint_name}\n"
-                        blueprint_info += f"Type: DOCUMENT\n"
-                        blueprint_info += f"Stage: DEVELOPMENT\n"
+                        blueprint_info += "Type: DOCUMENT\n"
+                        blueprint_info += "Stage: DEVELOPMENT\n"
                         blueprint_info += f"ARN: {blueprint_arn}\n\n"
                         
                         # Add formatted properties information
-                        if "properties" in blueprint_schema:
-                            field_count = len(blueprint_schema["properties"])
-                            blueprint_info += "Extraction Fields:\n"
-                            for prop_name, prop_details in blueprint_schema["properties"].items():
-                                prop_type = prop_details.get("type", "unknown")
-                                inference_type = prop_details.get("inferenceType", "unknown")
-                                instruction = prop_details.get("instruction", "")
-                                blueprint_info += f"• {prop_name} ({prop_type})\n  - {instruction}\n"
+                        field_count = blueprint_build.field_count
+                        blueprint_info += self._describe_blueprint(build=blueprint_build)
                 elif not use_blueprint:
                     blueprint_info = "Using default BDA extraction with LLM post-processing"
                 
@@ -331,19 +404,38 @@ class BDAEngine(OCREngine):
                         structured_json, token_usage = process_text_with_llm(extracted_text, output_schema)
                         logger.info("Successfully structured BDA output with LLM")
                         json_process_time = time.time() - json_start_time
-                        
+
                         if structured_json:
-                            # Use the structured JSON as our display JSON
+                            # Use the structured JSON as our display JSON.
+                            # Nothing is appended to `blueprint_info` here: it is
+                            # only returned when `use_blueprint` is true, so on
+                            # this branch it never reaches the panel. The timing
+                            # is logged below instead.
                             display_json = structured_json
-                            blueprint_info += f"\n\nPost-processed with Claude Haiku in {json_process_time:.2f} seconds"
+                            logger.info(
+                                f"Post-processed the BDA text with {POSTPROCESSING_MODEL} "
+                                f"in {json_process_time:.2f} seconds")
                     except Exception as e:
-                        logger.error(f"Error in LLM JSON structuring for BDA: {str(e)}")
-                        structured_json = {"error": str(e), "raw_text": extracted_text}
+                        # Structuring was asked for and failed, so there is no
+                        # schema-shaped result. Falling through would hand the raw
+                        # BDA envelope to the evaluator, which scores it 0% and
+                        # reads as poor extraction rather than a failed step.
+                        raise RuntimeError(
+                            f"Structuring the BDA output against the schema failed, so no "
+                            f"schema-shaped JSON was produced: {e}") from e
+
+                    # `process_text_with_llm` signals an unparseable model response by
+                    # returning this shape rather than raising. Both keys are checked
+                    # together, since a schema could legitimately define one named "error".
+                    if structured_json and 'error' in structured_json and 'raw_text' in structured_json:
+                        raise RuntimeError(
+                            f"The model's response could not be parsed as JSON, so the BDA "
+                            f"output was not structured: {structured_json['error']}")
                 
                 # Update blueprint info with matching result if available
                 if use_blueprint and custom_output and 'matched_blueprint' in custom_output:
                     matched_info = custom_output['matched_blueprint']
-                    blueprint_info += f"\nMatch Results:\n"
+                    blueprint_info += "\nMatch Results:\n"
                     blueprint_info += f"Matched Blueprint: {matched_info.get('name', 'Unknown')}\n"
                     blueprint_info += f"Confidence: {matched_info.get('confidence', 0) * 100:.1f}%\n"
                     if 'document_class' in custom_output:
@@ -351,17 +443,14 @@ class BDAEngine(OCREngine):
                 
                 # Determine which JSON to use for display and visualization
                 if is_pdf:
-                    # For PDF files, create a simple placeholder image
-                    annotated_image = np.zeros((400, 600, 3), dtype=np.uint8)
-                    from PIL import Image as PILImage, ImageDraw as PILImageDraw
-                    pil_img = PILImage.fromarray(annotated_image)
-                    draw = PILImageDraw.Draw(pil_img)
-                    draw.text((20, 20), f"PDF Processed with BDA", fill=(255, 255, 255))
-                    draw.text((20, 50), f"File: {object_key}", fill=(255, 255, 255))
-                    annotated_image = np.array(pil_img)
-                    
+                    annotated_image = self._visualise_pdf(
+                        pdf_bytes=file_bytes,
+                        custom_output=custom_output if use_blueprint else None,
+                    )
+
                     if use_blueprint and custom_output and 'inference_result' in custom_output:
-                        display_json = {'inference_result': custom_output['inference_result']}
+                        display_json = self._restore_blueprint_json(
+                            custom_output=custom_output, build=blueprint_build)
                     elif not use_blueprint and structured_json:
                         display_json = structured_json
                     else:
@@ -375,7 +464,8 @@ class BDAEngine(OCREngine):
                             img_pil.copy(), width, height, custom_output)
                         
                         if 'inference_result' in custom_output:
-                            display_json = {'inference_result': custom_output['inference_result']}
+                            display_json = self._restore_blueprint_json(
+                                custom_output=custom_output, build=blueprint_build)
                         else:
                             display_json = custom_output
                     else:
@@ -409,15 +499,21 @@ class BDAEngine(OCREngine):
                     "json_process_time": json_process_time,
                     "field_count": field_count,
                     "use_blueprint": use_blueprint,
-                    "pages": 1,
+                    "pages": self._page_count(
+                        is_pdf=is_pdf,
+                        custom_output=custom_output,
+                        standard_output=standard_output),
                     "operation_type": "bda"
                 }
                 
             except Exception as e:
-                logger.error(f"Error in BDA processing: {str(e)}")
-                
+                # Credential failures are reported by botocore without naming the
+                # profile at fault, which is the one thing the user needs to know.
+                error_message = describe_credential_error(e) or str(e)
+                logger.error(f"Error in BDA processing: {error_message}")
+
                 return {
-                    "text": f"BDA Error: {str(e)}",
+                    "text": f"BDA Error: {error_message}",
                     "json": None,
                     "image": None,
                     "process_time": timing_ctx.process_time,
@@ -557,6 +653,87 @@ class BDAEngine(OCREngine):
 
 
         
+    def _page_count(
+        self,
+        *,
+        is_pdf: bool,
+        custom_output: Optional[Dict[str, Any]],
+        standard_output: Optional[Dict[str, Any]],
+    ) -> int:
+        """
+        Determine how many pages BDA actually processed.
+
+        This used to be hardcoded to 1, which under-billed every multi-page run:
+        `calculate_bda_cost` charges per page, so a seven-page document was
+        costed as one. BDA reports the real figure in two different places
+        depending on which path ran, so both are read.
+
+        Args:
+            is_pdf: Whether the processed input was a PDF rather than an image.
+            custom_output: BDA custom output from the blueprint path, or None.
+            standard_output: BDA standard output, or None. Its `metadata` carries
+                `number_of_pages` for the whole document.
+
+        Returns:
+            The number of pages processed. Always 1 for a single image.
+
+        Raises:
+            ValueError: If a PDF was processed but neither payload names a page
+                count. Returning 1 here is the silent under-billing being fixed,
+                so it is an error instead.
+        """
+        if not is_pdf:
+            # One image is one billable unit, and BDA prices images separately.
+            return 1
+
+        reported = (standard_output or {}).get("metadata", {}).get("number_of_pages")
+        if isinstance(reported, int) and reported > 0:
+            return reported
+
+        # The blueprint path can return custom output without standard output.
+        # `split_document.page_indices` names every page the blueprint matched,
+        # 0-based, so its length is the page count.
+        page_indices = (custom_output or {}).get("split_document", {}).get("page_indices")
+        if isinstance(page_indices, list) and page_indices:
+            return len(set(page_indices))
+
+        raise ValueError(
+            "BDA processed a PDF but reported no page count in either "
+            "standard_output.metadata.number_of_pages or "
+            "custom_output.split_document.page_indices, so the run cannot be costed")
+
+    def _visualise_pdf(
+        self, *, pdf_bytes: bytes, custom_output: Optional[Dict[str, Any]]
+    ) -> np.ndarray:
+        """
+        Render a processed PDF's pages with the boxes BDA reported.
+
+        The PDF path used to answer with a 400x600 black rectangle, discarding
+        the `explainability_info` geometry BDA had already returned. Each page is
+        rendered and every extracted value is boxed on the page it was found on,
+        coloured per top-level field and labelled with its confidence.
+
+        Args:
+            pdf_bytes: The PDF that was processed.
+            custom_output: BDA custom output, or None for a run that produced no
+                blueprint result and therefore no geometry.
+
+        Returns:
+            The composed visualisation as an RGB numpy array, which is what the
+            Gradio image output takes.
+        """
+        boxes: List[PageBox] = []
+        if custom_output and custom_output.get("explainability_info"):
+            boxes = boxes_from_bda_explainability(
+                explainability_info=custom_output["explainability_info"]
+            )
+
+        return np.array(
+            compose_pdf_visualisation(
+                pdf_bytes=pdf_bytes, boxes=boxes, item_noun="values located"
+            )
+        )
+
     def _create_annotated_image_with_bda_boxes(self, img_pil, width, height, custom_output):
         """Create annotated image with BDA custom output boxes"""
         draw = ImageDraw.Draw(img_pil)
@@ -666,9 +843,8 @@ class BDAEngine(OCREngine):
             token_usage = result.get('token_usage')
             if token_usage:
                 from shared.cost_calculator import calculate_bedrock_cost
-                from shared.config import POSTPROCESSING_MODEL
-                _, haiku_cost = calculate_bedrock_cost(POSTPROCESSING_MODEL, token_usage)
-                total_cost += haiku_cost
+                _, postprocessing_cost = calculate_bedrock_cost(POSTPROCESSING_MODEL, token_usage)
+                total_cost += postprocessing_cost
                 
                 # Format HTML output with LLM cost
                 html = f'''
@@ -676,7 +852,7 @@ class BDAEngine(OCREngine):
                     <div class="cost-total">${total_cost:.6f} total</div>
                     <div class="cost-breakdown">
                         <span>${bda_base_cost:.6f} for BDA standard extraction</span><br>
-                        <span>${haiku_cost:.6f} for LLM post-processing</span>
+                        <span>${postprocessing_cost:.6f} for LLM post-processing</span>
                     </div>
                 </div>
                 '''

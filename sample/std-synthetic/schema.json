@@ -1,0 +1,196 @@
+{
+  "type": "object",
+  "properties": {
+    "employeeSection": {
+      "type": "object",
+      "description": "Completed by the employee",
+      "properties": {
+        "employeeName": {
+          "type": "string"
+        },
+        "memberId": {
+          "type": "string"
+        },
+        "workState": {
+          "type": "string"
+        },
+        "gender": {
+          "type": "string"
+        },
+        "jobTitle": {
+          "type": "string"
+        },
+        "disabilityDueToEmployment": {
+          "type": "string",
+          "enum": [
+            "YES",
+            "NO"
+          ]
+        },
+        "disabilityDueToAccident": {
+          "type": "string",
+          "enum": [
+            "YES",
+            "NO"
+          ]
+        },
+        "disabilityDueToMilitaryService": {
+          "type": "string",
+          "enum": [
+            "YES",
+            "NO"
+          ]
+        },
+        "dateSymptomsFirstAppeared": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "lastDayWorked": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "returnToWorkDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "returnToWorkDateType": {
+          "type": "string",
+          "enum": [
+            "ACTUAL",
+            "ESTIMATED"
+          ]
+        },
+        "federalTaxWithholdingPerWeek": {
+          "type": "number"
+        },
+        "employeeSignatureDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        }
+      }
+    },
+    "physicianSection": {
+      "type": "object",
+      "description": "Completed by the attending physician",
+      "properties": {
+        "physicianName": {
+          "type": "string"
+        },
+        "diagnosis": {
+          "type": "string"
+        },
+        "icd10Code": {
+          "type": "string"
+        },
+        "dateOfFirstVisit": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "dateOfSurgery": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "surgicalProcedure": {
+          "type": "string"
+        },
+        "hospitalizedFrom": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "hospitalizedThrough": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "totallyDisabledFrom": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "totallyDisabledThrough": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "dateOfNextAppointment": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "canReturnOnLimitedBasis": {
+          "type": "string",
+          "enum": [
+            "YES",
+            "NO"
+          ]
+        },
+        "limitationsRestrictions": {
+          "type": "string"
+        },
+        "referredPatientToAnotherPhysician": {
+          "type": "string",
+          "enum": [
+            "YES",
+            "NO"
+          ]
+        },
+        "physicianSignatureDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        }
+      }
+    },
+    "employerSection": {
+      "type": "object",
+      "description": "Completed by the employer",
+      "properties": {
+        "employerName": {
+          "type": "string"
+        },
+        "employerGroupNumber": {
+          "type": "string"
+        },
+        "employeeDateOfHire": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "scheduledHoursPerWeek": {
+          "type": "number"
+        },
+        "grossWeeklyEarnings": {
+          "type": "number"
+        },
+        "salaryContinuationPaid": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "salaryContinuationThrough": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "employerSignatureDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        }
+      }
+    },
+    "authorization": {
+      "type": "object",
+      "description": "Authorisation to release medical records",
+      "properties": {
+        "authorizationSigned": {
+          "type": "boolean"
+        },
+        "authorizationDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "recordsReleaseScope": {
+          "type": "string"
+        },
+        "revocationNoticeAddress": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
