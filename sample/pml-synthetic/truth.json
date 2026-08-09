@@ -1,0 +1,48 @@
+{
+  "claimantInformation": {
+    "claimantName": "Errol Vantassel",
+    "claimNumber": "SYN-8802455",
+    "dateOfBirth": "1984-11-02",
+    "workState": "NJ",
+    "occupation": "Warehouse team lead",
+    "lastDayWorked": "2025-03-14",
+    "firstDayOfDisability": "2025-03-17",
+    "expectedReturnToWork": "2025-06-09",
+    "disabilityDueToEmployment": "No",
+    "disabilityDueToPregnancy": "No",
+    "otherIncomeReceived": "None",
+    "claimantSignatureDate": "2025-03-21"
+  },
+  "employerStatement": {
+    "employerName": "Kestrel Freight Handling LLC",
+    "employerFein": "22-4180976",
+    "supervisorName": "Roshanne Iyer-Bowe",
+    "weeklyHours": 40,
+    "hourlyRate": 31.5,
+    "annualSalary": 65520.0,
+    "payFrequency": "Biweekly",
+    "employeeStillEmployed": "Yes",
+    "lastDayWorkedPerPayroll": "2025-03-14",
+    "employerSignatureDate": "2025-03-25"
+  },
+  "attendingPhysicianStatement": {
+    "physicianName": "Dr. Ines Rakotomalala",
+    "physicianLicenseNumber": "NJ-MD-118093",
+    "practiceName": "Passaic Valley Orthopaedics",
+    "diagnosis": "Lumbar disc herniation with radiculopathy",
+    "icd10Code": "M51.16",
+    "dateOfFirstVisit": "2025-03-17",
+    "dateSymptomsFirstAppeared": "2025-03-10",
+    "datesOfTreatment": [
+      "2025-03-17",
+      "2025-04-07",
+      "2025-05-12"
+    ],
+    "surgeryPerformed": "No",
+    "totallyDisabledFrom": "2025-03-17",
+    "totallyDisabledThrough": "2025-06-08",
+    "canReturnOnLimitedBasis": "Yes",
+    "limitationsRestrictions": "No lifting over 15 lbs, no repeated bending",
+    "physicianSignatureDate": "2025-03-24"
+  }
+}

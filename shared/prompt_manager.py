@@ -2,10 +2,9 @@
 # prompt_manager.py
 import json
 import time
-import logging
 
 from .aws_client import get_aws_client
-from .config import POSTPROCESSING_MODEL, logger
+from .config import POSTPROCESSING_MODEL, LLM_MAX_OUTPUT_TOKENS, logger
 
 OCR_SYSTEM_PROMPT = """
 You are an expert OCR and document analysis system. Extract all text and information from the image 
@@ -138,7 +137,11 @@ def process_text_with_llm(text, output_schema=None):
         response = bedrock_runtime.converse(
             modelId=POSTPROCESSING_MODEL,
             messages=messages,
-            system=system_messages
+            system=system_messages,
+            # Without an explicit maxTokens, Converse caps output at 4096 tokens and
+            # truncates mid-string, which surfaces only as a JSON parse error one
+            # step later. A multi-section claim form exceeds 4096 easily.
+            inferenceConfig={'maxTokens': LLM_MAX_OUTPUT_TOKENS}
         )
         
         # Extract text and token usage
@@ -150,7 +153,18 @@ def process_text_with_llm(text, output_schema=None):
         }
         
         logger.info(f"Token usage - Input: {token_usage['inputTokens']}, Output: {token_usage['outputTokens']}")
-        
+
+        # Truncation produces syntactically invalid JSON, so catching it here turns
+        # an unexplained parse error into an actionable one naming the real limit.
+        stop_reason = response.get('stopReason')
+        if stop_reason == 'max_tokens':
+            raise ValueError(
+                f"The model hit the {LLM_MAX_OUTPUT_TOKENS}-token output limit and its "
+                f"response was truncated, so it is not valid JSON. Raise "
+                f"OCR_LLM_MAX_OUTPUT_TOKENS, or reduce "
+                f"OCR_LLM_STRUCTURING_CHAR_BUDGET so fewer pages are structured per call."
+            )
+
         if 'output' in response and 'message' in response['output']:
             message = response['output']['message']
             if 'content' in message:

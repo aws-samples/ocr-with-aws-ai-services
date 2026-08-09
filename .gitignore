@@ -1,3 +1,13 @@
 __pycache__/
 Config
 results
+.DS_Store
+.worktrees/
+
+# Working notes kept while the features were being built, including measurements from
+# one account. The README is the documentation that ships.
+docs/
+
+# Local-only sample bundles. A bundle keeps a sample's document, its output schema and
+# its ground truth in one directory, so this single rule covers all three.
+sample/private/

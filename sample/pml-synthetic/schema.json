@@ -1,0 +1,167 @@
+{
+  "type": "object",
+  "properties": {
+    "claimantInformation": {
+      "type": "object",
+      "description": "Section 1, completed by the claimant",
+      "properties": {
+        "claimantName": {
+          "type": "string"
+        },
+        "claimNumber": {
+          "type": "string"
+        },
+        "dateOfBirth": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "workState": {
+          "type": "string"
+        },
+        "occupation": {
+          "type": "string"
+        },
+        "lastDayWorked": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "firstDayOfDisability": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "expectedReturnToWork": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "disabilityDueToEmployment": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "disabilityDueToPregnancy": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "otherIncomeReceived": {
+          "type": "string"
+        },
+        "claimantSignatureDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        }
+      }
+    },
+    "employerStatement": {
+      "type": "object",
+      "description": "Section 2, completed by the employer",
+      "properties": {
+        "employerName": {
+          "type": "string"
+        },
+        "employerFein": {
+          "type": "string"
+        },
+        "supervisorName": {
+          "type": "string"
+        },
+        "weeklyHours": {
+          "type": "number"
+        },
+        "hourlyRate": {
+          "type": "number"
+        },
+        "annualSalary": {
+          "type": "number"
+        },
+        "payFrequency": {
+          "type": "string"
+        },
+        "employeeStillEmployed": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "lastDayWorkedPerPayroll": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "employerSignatureDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        }
+      }
+    },
+    "attendingPhysicianStatement": {
+      "type": "object",
+      "description": "Section 3, completed by the attending physician",
+      "properties": {
+        "physicianName": {
+          "type": "string"
+        },
+        "physicianLicenseNumber": {
+          "type": "string"
+        },
+        "practiceName": {
+          "type": "string"
+        },
+        "diagnosis": {
+          "type": "string"
+        },
+        "icd10Code": {
+          "type": "string"
+        },
+        "dateOfFirstVisit": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "dateSymptomsFirstAppeared": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "datesOfTreatment": {
+          "type": "array",
+          "description": "ISO 8601 dates (YYYY-MM-DD)",
+          "items": {
+            "type": "string"
+          }
+        },
+        "surgeryPerformed": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "totallyDisabledFrom": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "totallyDisabledThrough": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "canReturnOnLimitedBasis": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "limitationsRestrictions": {
+          "type": "string"
+        },
+        "physicianSignatureDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        }
+      }
+    }
+  }
+}

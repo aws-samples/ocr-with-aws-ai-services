@@ -1,28 +1,31 @@
 # evaluator.py
 import os
 import json
-from typing import Dict, Any, Union, List, Tuple
+from typing import Dict, Any, Tuple
 from shared.config import logger
+from shared.sample_paths import sample_truth_path
 
 def load_truth_data(image_name: str) -> Tuple[Dict[str, Any], bool]:
     """
-    Load ground truth data for a given image name
-    
+    Load ground truth data for a given sample
+
     Args:
-        image_name: Name of the image file
-        
+        image_name: Dropdown label of a sample bundle, or the name of an uploaded
+                    file. An uploaded file is not a bundle, so it has no ground truth
+                    and (({}, False)) comes back - the same answer it has always given.
+
     Returns:
         Tuple of (truth data as dictionary, whether truth exists)
     """
     if not image_name:
         return {}, False
-    
-    # Extract base name without extension
-    base_name = os.path.splitext(os.path.basename(image_name))[0]
-    
-    # Check for truth file in sample/truth directory
-    truth_path = os.path.join("sample/truth", f"{base_name}.json")
-    
+
+    # Ground truth lives inside the sample's own bundle rather than in a shared
+    # sample/truth directory keyed on the filename. Two samples whose documents happen
+    # to share a filename used to share one ground truth file, and a document's ground
+    # truth used to sit in a directory separate from the document itself.
+    truth_path = sample_truth_path(sample_name=image_name)
+
     if os.path.exists(truth_path):
         try:
             with open(truth_path, "r") as f:
@@ -34,7 +37,7 @@ def load_truth_data(image_name: str) -> Tuple[Dict[str, Any], bool]:
         except Exception as e:
             logger.error(f"Error loading truth data from {truth_path}: {e}")
     else:
-        logger.info(f"No truth data found for {base_name} at {truth_path}")
+        logger.info(f"No truth data found for {image_name} at {truth_path}")
     
     return {}, False
 
@@ -231,9 +234,8 @@ def compare_lists(truth_list, extracted_list, path, result):
             
             best_match = None
             best_score = -1
-            best_idx = -1
-            
-            for j, extracted_item in enumerate(extracted_list):
+
+            for extracted_item in extracted_list:
                 if not isinstance(extracted_item, dict):
                     continue
                     
@@ -246,7 +248,6 @@ def compare_lists(truth_list, extracted_list, path, result):
                 if score > best_score:
                     best_score = score
                     best_match = extracted_item
-                    best_idx = j
             
             # If we found a reasonable match
             if best_match and best_score > 0.3:  # Threshold for considering a match
