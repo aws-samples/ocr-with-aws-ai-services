@@ -135,10 +135,13 @@ def read_history(*, results_dir: Path) -> List[Dict[str, Any]]:
 class TestWhereTheRecordGoes:
     """The filename has to identify the run without opening it."""
 
-    def test_the_filename_carries_the_timestamp_and_the_document(self, tmp_path) -> None:
-        """`ls results/` is the index, so the name must say which run this was."""
+    def test_the_filename_carries_the_timestamp_and_a_fixed_safe_identifier(
+        self, tmp_path
+    ) -> None:
+        """User-controlled document names never become path expressions."""
         run_record = write_run(results_dir=tmp_path)
-        assert run_record.record_path.name == "20260807-142203-form---4410772.json"
+        assert run_record.record_path.name == (
+            "20260807-142203-run-1682b1d1c022b004.json")
 
     def test_the_timestamp_leads_so_runs_sort_chronologically(self, tmp_path) -> None:
         """Comparing runs starts with putting them in order."""
@@ -161,10 +164,10 @@ class TestWhereTheRecordGoes:
         run_record = write_run(results_dir=results_dir)
         assert run_record.record_path.exists()
 
-    def test_a_document_name_with_nothing_usable_raises(self, tmp_path) -> None:
-        """A record named after nothing cannot be matched to a document later."""
+    def test_an_empty_document_name_raises(self, tmp_path) -> None:
+        """A record with no document identity cannot be compared later."""
         with pytest.raises(ValueError, match="record filename"):
-            write_run(results_dir=tmp_path, document_name="///")
+            write_run(results_dir=tmp_path, document_name="   ")
 
 
 class TestWhatTheRecordHolds:
@@ -381,7 +384,7 @@ class TestABatchRunIsRecordedToo:
     ) -> None:
         """Otherwise a one-sample batch is indistinguishable from a single run."""
         self.run_a_batch(tmp_path=tmp_path, monkeypatch=monkeypatch)
-        record_path = next((tmp_path / "results").glob("*-all-samples-1.json"))
+        record_path = next((tmp_path / "results").glob("*-run-*.json"))
         record = read_record(path=record_path)
 
         assert record["configuration"]["batch"] is True
@@ -393,7 +396,7 @@ class TestABatchRunIsRecordedToo:
     ) -> None:
         """The per-sample outputs are the other half of the batch's results."""
         self.run_a_batch(tmp_path=tmp_path, monkeypatch=monkeypatch)
-        record_path = next((tmp_path / "results").glob("*-all-samples-1.json"))
+        record_path = next((tmp_path / "results").glob("*-run-*.json"))
         run_directory = read_record(path=record_path)["configuration"]["run_directory"]
 
         assert (tmp_path / run_directory / "summary.json").exists()
@@ -403,7 +406,7 @@ class TestABatchRunIsRecordedToo:
         banner = self.run_a_batch(tmp_path=tmp_path, monkeypatch=monkeypatch)
 
         assert "saved to" in banner
-        assert "all-samples-1.json" in banner
+        assert "-run-" in banner
 
     def test_a_failed_batch_attempt_is_not_recorded_as_a_run(
         self, tmp_path, monkeypatch
@@ -453,9 +456,9 @@ class TestReportingTheSaveToTheUser:
             recorded_at=RECORDED_AT)
 
         assert "saved to" in note
-        assert "20260807-142203-form---4410772.json" in note
+        assert "20260807-142203-run-1682b1d1c022b004.json" in note
         assert (tmp_path / "results"
-                / "20260807-142203-form---4410772.json").exists()
+                / "20260807-142203-run-1682b1d1c022b004.json").exists()
 
     def test_a_failed_save_reports_it_instead_of_raising(self, tmp_path, monkeypatch) -> None:
         """A paid extraction must not be discarded because a write failed."""

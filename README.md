@@ -867,8 +867,8 @@ Both **Process File** and **Process All Samples** write two things, and name the
 first of them in the status banner so you do not have to go looking:
 
 ```
-results/20260808-133435-pfl-synthetic.json      the full record of one run
-results/20260808-140902-all-samples-10.json     the same, for a batch run
+results/20260808-133435-run-<id>.json            the full record of one run
+results/20260808-140902-run-<id>.json            the same, for a batch run
 results/history.jsonl                           one line per engine per run
 ```
 

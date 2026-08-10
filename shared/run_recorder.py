@@ -8,9 +8,9 @@ a screenshot.
 
 Every run now writes two things under `results/`:
 
-- `<timestamp>-<document>.json` - the full record, including each engine's cost
-  breakdown and the configuration that produced it. This is the file to read when
-  asking "why did that cost that much?".
+- `<timestamp>-run-<id>.json` - the full record, including the document name, each
+  engine's cost breakdown and the configuration that produced it. This is the file
+  to read when asking "why did that cost that much?".
 - `history.jsonl` - one flat line per engine per run, appended. This is the file to
   read when asking "how has BDA's accuracy moved?", because a line-per-observation
   file needs no traversal to filter:
@@ -26,9 +26,8 @@ run cost.
 can assert an exact filename and an exact record.
 """
 
+import hashlib
 import json
-import os
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -44,12 +43,6 @@ DEFAULT_RESULTS_DIR = Path("results")
 # Appended to, never rewritten: the history of every run is the point of the file.
 HISTORY_FILENAME = "history.jsonl"
 
-# Used in the record filename. Anything outside this set becomes a hyphen, which
-# both keeps the name portable and stops a document name such as
-# "claims/PFL/form - 4410772" writing outside the results directory.
-_UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
-
-
 @dataclass(frozen=True)
 class RunRecord:
     """
@@ -64,31 +57,25 @@ class RunRecord:
     history_path: Path
 
 
-def _filename_slug(*, document_name: str) -> str:
+def _record_id(*, document_name: str) -> str:
     """
-    Reduce a document name to something safe to put in a filename.
+    Build a fixed-alphabet identifier for a document name.
 
     Args:
         document_name: Document name as shown in the UI, which for a sample PDF is
             a path such as "claims/PFL/form - 4410772".
 
     Returns:
-        str: The document's base name with unsafe runs collapsed to hyphens.
+        str: First 16 hexadecimal characters of the document-name SHA-256 digest.
 
     Raises:
-        ValueError: If nothing usable is left. A record whose name says nothing
-            about the document it describes is not worth writing.
+        ValueError: If the document name is empty.
     """
-    # Grouping labels remain in the record body, but never become directories in
-    # the record filename.
-    base_name = os.path.splitext(os.path.basename(document_name))[0]
-    slug = _UNSAFE_IN_FILENAME.sub("-", base_name).strip("-")
-
-    if not slug:
+    if not document_name.strip():
         raise ValueError(
-            f"Cannot build a record filename from document name {document_name!r}")
+            "Cannot build a record filename from an empty document name")
 
-    return slug
+    return hashlib.sha256(document_name.encode("utf-8")).hexdigest()[:16]
 
 
 def _describe_row(*, row: RunRow) -> Dict[str, Any]:
@@ -172,7 +159,9 @@ def record_run(
 
     # Sorts chronologically as text, so `ls results/` is in run order.
     timestamp = recorded_at.strftime("%Y%m%d-%H%M%S")
-    record_path = results_dir / f"{timestamp}-{_filename_slug(document_name=document_name)}.json"
+    record_path = (
+        results_dir / f"{timestamp}-run-{_record_id(document_name=document_name)}.json"
+    )
     history_path = results_dir / HISTORY_FILENAME
 
     recorded_at_iso = recorded_at.isoformat(timespec="seconds")

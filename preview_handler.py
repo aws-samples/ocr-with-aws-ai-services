@@ -1,8 +1,13 @@
-import os
 import io
 import base64
+import html
+from pathlib import Path
+
+from gradio.processing_utils import get_upload_folder
 from PIL import Image
+
 from shared.config import logger
+from shared.sample_paths import SAMPLE_DIR
 from shared.ui_theme import banner, note, page_readout
 
 # Try to import PDF processing libraries
@@ -12,6 +17,29 @@ try:
 except ImportError:
     HAS_PYMUPDF = False
     logger.info("PyMuPDF not available - using embedded PDF viewer only")
+
+
+def _resolve_preview_path(file_path) -> Path:
+    """
+    Resolve a preview file only from directories the app owns
+
+    Gradio sends uploaded files through its server-side upload folder. Sample
+    selections use the repository's sample directory. No other client-provided path
+    is a valid preview source.
+    """
+    candidate = Path(file_path).resolve(strict=True)
+    allowed_roots = (
+        Path(get_upload_folder()).resolve(),
+        (Path.cwd() / SAMPLE_DIR).resolve(),
+    )
+
+    if not any(candidate == root or root in candidate.parents for root in allowed_roots):
+        raise ValueError("Preview file is outside the upload and sample directories")
+    if not candidate.is_file():
+        raise ValueError("Preview source is not a file")
+
+    return candidate
+
 
 def handle_file_preview(file):
     """
@@ -28,8 +56,15 @@ def handle_file_preview(file):
                 False, 0, 1, None)
 
 
-    file_path = file.name if hasattr(file, 'name') else str(file)
-    file_ext = os.path.splitext(file_path)[1].lower()
+    untrusted_path = file.name if hasattr(file, 'name') else str(file)
+    try:
+        file_path = _resolve_preview_path(untrusted_path)
+    except (OSError, ValueError) as path_error:
+        logger.error(f"Rejected preview path: {path_error}")
+        return (None, banner(tone="error", text="Could not open that file"),
+                False, 0, 1, None)
+
+    file_ext = file_path.suffix.lower()
     
     logger.info(f"Handling preview for file: {file_path} (extension: {file_ext})")
     
@@ -58,11 +93,11 @@ def handle_file_preview(file):
                 if pdf_image:
                     logger.info(f"Converted PDF to image for preview: {file_path}")
                     return (pdf_image, create_pdf_info_html(file_path, 0, page_count), 
-                           page_count > 1, 0, page_count, file_path)
+                           page_count > 1, 0, page_count, str(file_path))
             
             # Fallback to embedded PDF viewer
             pdf_preview_html = create_pdf_preview(file_path)
-            return (None, pdf_preview_html, False, 0, page_count, file_path)
+            return (None, pdf_preview_html, False, 0, page_count, str(file_path))
         except Exception as e:
             logger.error(f"Error creating PDF preview: {str(e)}")
             return (None, banner(tone="error", text=f"Could not load PDF: {e}"),
@@ -97,7 +132,7 @@ def create_pdf_preview(pdf_path):
         html_content = f"""
         <div style="width: 100%; height: 500px; border: 1px solid #c8ccd4; border-radius: 8px; overflow: hidden; background: #ffffff; color: #1e293b;">
             <div style="background: #eef1f5; color: #1e293b; padding: 8px 10px; font-size: 13px; border-bottom: 1px solid #c8ccd4; display: flex; justify-content: space-between; align-items: center;">
-                <span>{os.path.basename(pdf_path)}</span>
+                <span>{html.escape(Path(pdf_path).name)}</span>
                 <span style="font-size: 12px; opacity: 0.7;">{pdf_size:.1f} KB</span>
             </div>
 
@@ -114,7 +149,7 @@ def create_pdf_preview(pdf_path):
                 <div id="pdf-fallback" style="display: none; padding: 40px; text-align: center; height: 100%; box-sizing: border-box; background: #ffffff; color: #1e293b;">
                     <div style="background: #f4f6f9; color: #1e293b; padding: 30px; border-radius: 8px; border: 1px dashed #a9b1bd;">
                         <p style="margin: 0 0 12px 0; font-size: 15px; font-weight: 600;">
-                            {os.path.basename(pdf_path)}
+                            {html.escape(Path(pdf_path).name)}
                         </p>
                         <p style="margin: 6px 0; font-size: 13px; opacity: 0.75;">
                             {pdf_size:.1f} KB · ready for OCR processing
@@ -226,13 +261,10 @@ def create_pdf_info_html(pdf_path, current_page=0, total_pages=1):
         str: HTML content with PDF info
     """
     try:
-        file_size = os.path.getsize(pdf_path) / 1024  # Size in KB
-
         return f"""
         <div class='ocr-card'>
             <h4 class='ocr-card__title'>PDF document</h4>
-            <p class='ocr-card__row'><span>File</span><span>{os.path.basename(pdf_path)}</span></p>
-            <p class='ocr-card__row'><span>Size</span><span>{file_size:.1f} KB</span></p>
+            <p class='ocr-card__row'><span>File</span><span>{html.escape(Path(pdf_path).name)}</span></p>
             <p class='ocr-card__row'><span>Pages</span><span>{total_pages}</span></p>
             <p class='ocr-card__footer'>Showing page {current_page + 1} of {total_pages}</p>
         </div>
@@ -254,7 +286,13 @@ def navigate_pdf_page(pdf_path, page_num, total_pages):
     Returns:
         Tuple of (image, info_html, page_info_html)
     """
-    if not pdf_path or not os.path.exists(pdf_path):
+    if not pdf_path:
+        return (None, banner(tone="error", text="PDF not found"),
+                page_readout(current_page=0, total_pages=1))
+
+    try:
+        resolved_pdf_path = _resolve_preview_path(pdf_path)
+    except (OSError, ValueError):
         return (None, banner(tone="error", text="PDF not found"),
                 page_readout(current_page=0, total_pages=1))
 
@@ -264,9 +302,10 @@ def navigate_pdf_page(pdf_path, page_num, total_pages):
 
     try:
         if HAS_PYMUPDF:
-            pdf_image = convert_pdf_to_image(pdf_path, page_num=page_num)
+            pdf_image = convert_pdf_to_image(resolved_pdf_path, page_num=page_num)
             if pdf_image:
-                info_html = create_pdf_info_html(pdf_path, page_num, total_pages)
+                info_html = create_pdf_info_html(
+                    resolved_pdf_path, page_num, total_pages)
                 return pdf_image, info_html, page_info_html
 
         # Fallback
