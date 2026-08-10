@@ -19,6 +19,21 @@ except ImportError:
     logger.info("PyMuPDF not available - using embedded PDF viewer only")
 
 
+def _preview_files_under(root: Path):
+    """Yield files discovered beneath a server-owned root."""
+    resolved_root = root.resolve()
+    for candidate in resolved_root.rglob("*"):
+        try:
+            resolved_candidate = candidate.resolve(strict=True)
+        except OSError:
+            continue
+
+        if resolved_root not in resolved_candidate.parents:
+            continue
+        if resolved_candidate.is_file():
+            yield candidate, resolved_candidate
+
+
 def _resolve_preview_path(file_path) -> Path:
     """
     Resolve a preview file only from directories the app owns
@@ -27,18 +42,25 @@ def _resolve_preview_path(file_path) -> Path:
     selections use the repository's sample directory. No other client-provided path
     is a valid preview source.
     """
-    candidate = Path(file_path).resolve(strict=True)
+    requested_path = str(file_path)
+    working_directory = Path.cwd()
     allowed_roots = (
-        Path(get_upload_folder()).resolve(),
-        (Path.cwd() / SAMPLE_DIR).resolve(),
+        Path(get_upload_folder()),
+        working_directory / SAMPLE_DIR,
     )
 
-    if not any(candidate == root or root in candidate.parents for root in allowed_roots):
-        raise ValueError("Preview file is outside the upload and sample directories")
-    if not candidate.is_file():
-        raise ValueError("Preview source is not a file")
+    for root in allowed_roots:
+        for candidate, resolved_candidate in _preview_files_under(root):
+            aliases = {str(candidate), str(resolved_candidate)}
+            try:
+                aliases.add(str(candidate.relative_to(working_directory)))
+            except ValueError:
+                pass
 
-    return candidate
+            if requested_path in aliases:
+                return resolved_candidate
+
+    raise ValueError("Preview file is outside the upload and sample directories")
 
 
 def handle_file_preview(file):

@@ -26,6 +26,18 @@ def test_sample_file_inside_sample_root_is_allowed(tmp_path, monkeypatch):
     assert preview_handler._resolve_preview_path(sample) == sample.resolve()
 
 
+def test_relative_sample_path_inside_sample_root_is_allowed(tmp_path, monkeypatch):
+    sample = tmp_path / "sample" / "claims" / "claim.pdf"
+    sample.parent.mkdir(parents=True)
+    sample.write_bytes(b"%PDF-1.4")
+    monkeypatch.chdir(tmp_path)
+
+    assert (
+        preview_handler._resolve_preview_path(Path("sample/claims/claim.pdf"))
+        == sample.resolve()
+    )
+
+
 def test_preview_path_outside_allowed_roots_is_rejected(tmp_path, monkeypatch):
     upload_root = tmp_path / "gradio"
     upload_root.mkdir()
