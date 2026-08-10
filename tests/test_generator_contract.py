@@ -15,7 +15,7 @@ import os
 import pytest
 from gradio.utils import is_prop_update
 
-from event_handler import handle_sample_selection
+from event_handler import clear_sample_context_for_upload, handle_sample_selection
 from processor import process_image_with_engines
 from sample_handler import process_all_samples
 from shared.comparison_utils import ENGINE_FILTER_CHOICES
@@ -198,3 +198,16 @@ def test_empty_selection_returns_five_values(sample_tree):
 
     assert len(result) == 5
     assert is_prop_update(result[2]), "an empty selection must not clear the schema either"
+
+
+def test_manual_upload_clears_sample_truth_context():
+    """An uploaded file must not inherit the previously selected sample's truth."""
+    dropdown_update, sample_name, truth, truth_status = (
+        clear_sample_context_for_upload()
+    )
+
+    assert is_prop_update(dropdown_update)
+    assert dropdown_update["value"] is None
+    assert sample_name == ""
+    assert truth is None
+    assert truth_status == "<div></div>"

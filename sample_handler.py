@@ -1,4 +1,5 @@
 import concurrent.futures
+import hashlib
 import os
 import json
 import time
@@ -20,11 +21,14 @@ from shared.cost_calculator import merge_cost_components
 from shared.evaluator import load_truth_data
 from shared.results_table import RunRow, rows_to_html
 from shared.run_recorder import save_run_record
+import shared.sample_paths
 from shared.sample_paths import SAMPLE_DIR, list_sample_bundles
+from shared.sample_paths import bundle_dir
 from shared.sample_paths import is_pdf_sample as bundle_is_pdf
 from shared.sample_paths import sample_document_path
 from shared.sample_paths import sample_schema_path as bundle_schema_path
 from shared.truth_handler import truth_status_banner
+from shared.ui_theme import banner
 
 # Path resolution for samples lives in shared.sample_paths, which shared.evaluator
 # also imports. The thin wrappers below keep sample_handler's existing call signatures
@@ -85,13 +89,12 @@ def resolve_sample_path(sample_name: str) -> str:
 
     if document_path is None:
         raise FileNotFoundError(
-            f"Sample not found on disk: no document in bundle "
-            f"{os.path.join(SAMPLE_DIR, sample_name or '')}")
+            f"Sample not found on disk: no bundle registered as {sample_name!r}")
 
     return document_path
 
 
-def sample_schema_path(sample_name: str) -> str:
+def sample_schema_path(sample_name: str) -> Optional[str]:
     """
     Build the schema path for a sample label
 
@@ -105,9 +108,32 @@ def sample_schema_path(sample_name: str) -> str:
         sample_name: Dropdown label as produced by list_sample_documents()
 
     Returns:
-        Path to the schema file, which may not exist
+        Path to the schema file, or None when the label is not a sample bundle
     """
     return bundle_schema_path(sample_name=sample_name)
+
+
+def sample_result_directory(*, run_dir: str, sample_name: str) -> str:
+    """Return a collision-free result directory for a discovered sample bundle."""
+    source_directory = bundle_dir(sample_name=sample_name)
+    if source_directory is None:
+        raise FileNotFoundError(
+            f"Cannot create a result directory for unknown sample {sample_name!r}")
+
+    relative_directory = os.path.relpath(
+        source_directory, shared.sample_paths.SAMPLE_DIR)
+    result_directory = os.path.join(run_dir, relative_directory)
+
+    # The relative path comes from the discovered directory, not from sample_name.
+    # Keep an explicit containment check as defense in depth for future changes.
+    run_root = os.path.abspath(run_dir)
+    if os.path.commonpath(
+        [run_root, os.path.abspath(result_directory)]
+    ) != run_root:
+        raise ValueError(
+            f"Sample result path resolves outside the run directory: {sample_name!r}")
+
+    return result_directory
 
 
 def load_sample_document_and_schema(sample_filename):
@@ -129,7 +155,7 @@ def load_sample_document_and_schema(sample_filename):
     schema = None
     schema_path = sample_schema_path(sample_filename)
 
-    if os.path.exists(schema_path):
+    if schema_path and os.path.exists(schema_path):
         try:
             with open(schema_path, "r") as f:
                 schema = f.read()
@@ -141,7 +167,7 @@ def load_sample_document_and_schema(sample_filename):
         except Exception as e:
             logger.error(f"Error loading schema: {str(e)}")
     else:
-        logger.info(f"No schema found for sample: {schema_path}")
+        logger.info(f"No schema found for sample: {sample_filename}")
 
     return document_path, schema
 
@@ -207,6 +233,7 @@ def process_all_samples(use_textract, use_bedrock, use_bda,
             "total_cost": 0,
             "accuracy_values": [],
             "cost_components": [],
+            "failure_count": 0,
         }
         for engine_name in ("Textract", "Bedrock", "BDA")
     }
@@ -231,19 +258,27 @@ def process_all_samples(use_textract, use_bedrock, use_bda,
     
     # Get bedrock model ID if needed
     model_id = BEDROCK_MODELS.get(bedrock_model_name, "") if use_bedrock else ""
+    selected_engines = [
+        name for name, selected in (
+            ("Textract", use_textract),
+            ("Bedrock", use_bedrock),
+            ("BDA", use_bda),
+        ) if selected
+    ]
     
     # Process each sample
     for i, sample_name in enumerate(samples):
+        settled_engines = set()
         status_html = f"<div class='status-processing'>Processing sample {i+1}/{len(samples)}: {sample_name}</div>"
         
         yield status_html, rows_to_html(
             rows=build_batch_rows(results_by_engine=results_by_engine))
         
         try:
-            # Setup sample directory. Use the basename so a PDF under a sub-folder
-            # does not create nested result directories.
-            sample_base_name = os.path.splitext(os.path.basename(sample_name))[0]
-            sample_dir = os.path.join(run_dir, sample_base_name)
+            # Mirror the validated bundle hierarchy under this run. Using only the
+            # basename made a/receipt and b/receipt overwrite each other.
+            sample_dir = sample_result_directory(
+                run_dir=run_dir, sample_name=sample_name)
             os.makedirs(sample_dir, exist_ok=True)
 
             # Load the sample. PDFs are handed to the engines as a path - all three
@@ -307,60 +342,82 @@ def process_all_samples(use_textract, use_bedrock, use_bda,
                         # Get the direct engine result
                         result = future.result()
                         
-                        if result:
-                            # Use process_engine_result for consistent accuracy calculation
-                            from processor import process_engine_result
-                            processed_result = process_engine_result(engine_name, result, truth_data, truth_exists)
-                            
-                            # Extract fields from processed result
-                            process_time = processed_result.get('time', 0)
-                            extracted_text = processed_result.get('text', '')
-                            json_data = processed_result.get('json', {})
-                            image_data = processed_result.get('image')
-                            accuracy = processed_result.get('accuracy', 0)
-                            cost = processed_result.get('cost', 0)
-                            page_count = processed_result.get('pages', 0)
-                            cost_breakdown = processed_result.get('cost_breakdown', [])
-                            
-                            # Log debug information about structure comparison
-                            if truth_exists and json_data:
-                                log_structure_comparison(sample_name, engine_name, truth_data, json_data, accuracy)
-                            
-                            # Save results to disk
-                            engine_dir = os.path.join(sample_dir, engine_name.lower())
-                            os.makedirs(engine_dir, exist_ok=True)
-                            
-                            # Save extracted text
-                            save_text_result(extracted_text, os.path.join(engine_dir, "text.txt"))
-                            
-                            # Save JSON result
-                            save_json_result(json_data, engine_name, sample_name, os.path.join(engine_dir, "result.json"))
-                            
-                            # Save visualization image
-                            save_visualization_image(image_data, os.path.join(engine_dir, "visualization.jpg"))
-                            
-                            # Save metadata
-                            save_metadata(engine_name, result, process_time, cost, accuracy,
-                                         os.path.join(engine_dir, "metadata.json"),
-                                         page_count=page_count)
+                        # Use process_engine_result for consistent error detection,
+                        # accuracy calculation and costing.
+                        from processor import process_engine_result
+                        processed_result = process_engine_result(
+                            engine_name, result, truth_data, truth_exists)
+                        settled_engines.add(engine_name)
 
-                            # Update engine results
-                            results_by_engine[engine_name]["count"] += 1
-                            results_by_engine[engine_name]["total_pages"] += page_count
-                            results_by_engine[engine_name]["total_time"] += process_time
-                            results_by_engine[engine_name]["total_cost"] += cost
-                            results_by_engine[engine_name]["accuracy_values"].append(accuracy)
-                            results_by_engine[engine_name]["cost_components"].extend(cost_breakdown)
-
-                            # Update UI with current progress
-                            intermediate_status = f"<div class='status-processing'>Processing sample {i+1}/{len(samples)}: {sample_name} - {engine_name} completed</div>"
+                        if processed_result.get("succeeded") is not True:
+                            results_by_engine[engine_name]["failure_count"] += 1
+                            handle_engine_error(
+                                engine_name, sample_name,
+                                RuntimeError(processed_result.get(
+                                    "text", "engine reported an error")))
+                            intermediate_status = (
+                                f"<div class='status-processing'>Processing sample "
+                                f"{i+1}/{len(samples)}: {sample_name} - "
+                                f"{engine_name} failed</div>")
                             yield intermediate_status, rows_to_html(
-                                rows=build_batch_rows(results_by_engine=results_by_engine))
+                                rows=build_batch_rows(
+                                    results_by_engine=results_by_engine))
+                            continue
+                            
+                        # Extract fields from processed result
+                        process_time = processed_result.get('time', 0)
+                        extracted_text = processed_result.get('text', '')
+                        json_data = processed_result.get('json', {})
+                        image_data = processed_result.get('image')
+                        accuracy = processed_result.get('accuracy', 0)
+                        cost = processed_result.get('cost', 0)
+                        page_count = processed_result.get('pages', 0)
+                        cost_breakdown = processed_result.get('cost_breakdown', [])
+                            
+                        # Log debug information about structure comparison
+                        if truth_exists and json_data:
+                            log_structure_comparison(sample_name, engine_name, truth_data, json_data, accuracy)
+                            
+                        # Save results to disk
+                        engine_dir = os.path.join(sample_dir, engine_name.lower())
+                        os.makedirs(engine_dir, exist_ok=True)
+                            
+                        # Save extracted text
+                        save_text_result(extracted_text, os.path.join(engine_dir, "text.txt"))
+                            
+                        # Save JSON result
+                        save_json_result(json_data, engine_name, sample_name, os.path.join(engine_dir, "result.json"))
+                            
+                        # Save visualization image
+                        save_visualization_image(image_data, os.path.join(engine_dir, "visualization.jpg"))
+                            
+                        # Save metadata
+                        save_metadata(engine_name, result, process_time, cost, accuracy,
+                                     os.path.join(engine_dir, "metadata.json"),
+                                     page_count=page_count)
+
+                        # Update engine results
+                        results_by_engine[engine_name]["count"] += 1
+                        results_by_engine[engine_name]["total_pages"] += page_count
+                        results_by_engine[engine_name]["total_time"] += process_time
+                        results_by_engine[engine_name]["total_cost"] += cost
+                        results_by_engine[engine_name]["accuracy_values"].append(accuracy)
+                        results_by_engine[engine_name]["cost_components"].extend(cost_breakdown)
+
+                        # Update UI with current progress
+                        intermediate_status = f"<div class='status-processing'>Processing sample {i+1}/{len(samples)}: {sample_name} - {engine_name} completed</div>"
+                        yield intermediate_status, rows_to_html(
+                            rows=build_batch_rows(results_by_engine=results_by_engine))
 
                     except Exception as e:
+                        settled_engines.add(engine_name)
+                        results_by_engine[engine_name]["failure_count"] += 1
                         handle_engine_error(engine_name, sample_name, e)
         
         except Exception as e:
+            for engine_name in selected_engines:
+                if engine_name not in settled_engines:
+                    results_by_engine[engine_name]["failure_count"] += 1
             handle_sample_error(sample_name, e, run_dir)
     
     # Create summary at the end
@@ -374,35 +431,52 @@ def process_all_samples(use_textract, use_bedrock, use_bda,
     # in results/history.jsonl alongside single runs rather than only inside its own
     # run_ directory. Without this, "run it repeatedly and compare" would not cover
     # the button that does the most work.
-    saved_note = save_run_record(
-        document_name=f"all-samples-{len(samples)}",
-        rows=batch_rows,
-        total_time_s=total_time,
-        configuration={
-            "batch": True,
-            "samples": len(samples),
-            "engines": sorted(
-                name for name, selected in (
-                    ("Textract", use_textract),
-                    ("Bedrock", use_bedrock),
-                    ("BDA", use_bda),
-                ) if selected),
-            "bedrock_model": bedrock_model_name if use_bedrock else None,
-            "document_type": document_type,
-            "structured_output": enable_structured_output,
-            "bda_blueprint": use_bda_blueprint if use_bda else None,
-            "textract_features": sorted(textract_features or []) if use_textract else None,
-            "textract_queries": bool(textract_queries) if use_textract else None,
-            "run_directory": run_dir,
-        },
-        # A batch scores whichever samples have ground truth, so the flag reports
-        # whether any accuracy figure in these rows could be scored at all.
-        ground_truth_available=any(
-            data["accuracy_values"] for data in results_by_engine.values()))
+    successful_attempts = sum(
+        data["count"] for data in results_by_engine.values())
+    failed_attempts = sum(
+        data["failure_count"] for data in results_by_engine.values())
+    total_attempts = successful_attempts + failed_attempts
 
-    status_html = (
-        f"<div class='status-completed'>All {len(samples)} samples processed in "
-        f"{total_time:.2f} seconds. Results saved in {run_dir}{saved_note}</div>")
+    saved_note = ""
+    if batch_rows:
+        saved_note = save_run_record(
+            document_name=f"all-samples-{len(samples)}",
+            rows=batch_rows,
+            total_time_s=total_time,
+            configuration={
+                "batch": True,
+                "samples": len(samples),
+                "engines": sorted(selected_engines),
+                "successful_attempts": successful_attempts,
+                "failed_attempts": failed_attempts,
+                "bedrock_model": bedrock_model_name if use_bedrock else None,
+                "document_type": document_type,
+                "structured_output": enable_structured_output,
+                "bda_blueprint": use_bda_blueprint if use_bda else None,
+                "textract_features": sorted(textract_features or []) if use_textract else None,
+                "textract_queries": bool(textract_queries) if use_textract else None,
+                "run_directory": run_dir,
+            },
+            ground_truth_available=any(
+                data["accuracy_values"] for data in results_by_engine.values()))
+
+    if failed_attempts == 0:
+        status_html = banner(
+            tone="ok",
+            text=f"All <b>{total_attempts}</b> engine attempts completed in "
+                 f"<code>{total_time:.2f}s</code> · results in "
+                 f"<code>{run_dir}</code>{saved_note}")
+    elif successful_attempts:
+        status_html = banner(
+            tone="warn",
+            text=f"<b>{successful_attempts}/{total_attempts}</b> engine attempts "
+                 f"completed in <code>{total_time:.2f}s</code> · results in "
+                 f"<code>{run_dir}</code>{saved_note}")
+    else:
+        status_html = banner(
+            tone="error",
+            text=f"All <b>{failed_attempts}</b> engine attempts failed after "
+                 f"<code>{total_time:.2f}s</code> · no benchmark result was saved")
 
     # yield, not return: a generator's return value never reaches Gradio, so
     # returning here left the last per-sample progress message on screen and the
@@ -471,7 +545,7 @@ def load_sample_schema(sample_name, default_schema=""):
     sample_schema = None
     schema_path = sample_schema_path(sample_name)
 
-    if os.path.exists(schema_path):
+    if schema_path and os.path.exists(schema_path):
         try:
             with open(schema_path, "r") as f:
                 sample_schema = f.read()
@@ -626,13 +700,20 @@ def handle_engine_error(engine_name, sample_name, error):
     """Handle errors during engine processing"""
     logger.error(f"Error getting result for {engine_name} on {sample_name}: {str(error)}")
     import traceback
-    logger.error(f"Stack trace: {traceback.format_exc()}")
+    stack_trace = traceback.format_exc()
+    if stack_trace.strip() != "NoneType: None":
+        logger.error(f"Stack trace: {stack_trace}")
 
 
 def handle_sample_error(sample_name, error, run_dir):
     """Handle errors during sample processing"""
     logger.error(f"Error processing sample {sample_name}: {str(error)}")
-    sample_dir = os.path.join(run_dir, os.path.splitext(sample_name)[0])
+    try:
+        sample_dir = sample_result_directory(
+            run_dir=run_dir, sample_name=sample_name)
+    except (FileNotFoundError, ValueError):
+        sample_id = hashlib.sha256(sample_name.encode("utf-8")).hexdigest()[:12]
+        sample_dir = os.path.join(run_dir, "errors", sample_id)
     os.makedirs(sample_dir, exist_ok=True)
     error_file = os.path.join(sample_dir, "error.txt")
     with open(error_file, "w") as f:
@@ -659,7 +740,7 @@ def create_summary(results_by_engine, samples_count, start_time, run_dir,
     
     # Add engine-specific results to summary
     for engine, data in results_by_engine.items():
-        if data["count"] > 0:
+        if data["count"] > 0 or data.get("failure_count", 0) > 0:
             avg_accuracy = 0
             if data["accuracy_values"]:
                 avg_accuracy = sum(data["accuracy_values"]) / len(data["accuracy_values"])
@@ -670,13 +751,16 @@ def create_summary(results_by_engine, samples_count, start_time, run_dir,
 
             summary["results"][engine] = {
                 "documents_processed": data["count"],
+                "documents_failed": data.get("failure_count", 0),
                 "total_pages": total_pages,
                 "total_time": data["total_time"],
-                "avg_time_per_document": data["total_time"] / data["count"],
+                "avg_time_per_document": (
+                    data["total_time"] / data["count"] if data["count"] else None),
                 "avg_time_per_page": (
                     data["total_time"] / total_pages if total_pages > 0 else None),
                 "total_cost": data["total_cost"],
-                "avg_cost_per_document": data["total_cost"] / data["count"],
+                "avg_cost_per_document": (
+                    data["total_cost"] / data["count"] if data["count"] else None),
                 "avg_cost_per_page": (
                     data["total_cost"] / total_pages if total_pages > 0 else None),
                 "avg_accuracy": avg_accuracy

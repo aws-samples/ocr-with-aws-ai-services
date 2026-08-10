@@ -405,6 +405,40 @@ class TestABatchRunIsRecordedToo:
         assert "saved to" in banner
         assert "all-samples-1.json" in banner
 
+    def test_a_failed_batch_attempt_is_not_recorded_as_a_run(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The batch summary records the failure, but history gets no fake run."""
+        bundle = tmp_path / "sample" / "receipt"
+        bundle.mkdir(parents=True)
+        Image.new("RGB", (8, 8), "white").save(bundle / "receipt.png")
+        monkeypatch.chdir(tmp_path)
+
+        class FailingTextract:
+            def process_image(self, image, options=None) -> Dict[str, Any]:
+                return {
+                    "text": "Textract Error: access denied",
+                    "json": None,
+                    "image": None,
+                    "process_time": 1.5,
+                    "operation_type": "error",
+                    "pages": 0,
+                }
+
+        monkeypatch.setattr(sample_handler, "TextractEngine", FailingTextract)
+
+        payloads = list(sample_handler.process_all_samples(
+            True, False, False, "Claude Sonnet 5"))
+        final_status = payloads[-1][0]
+        run_dir = next((tmp_path / "results").glob("run_*"))
+        summary = json.loads((run_dir / "summary.json").read_text())
+
+        assert "ocr-banner--error" in final_status
+        assert summary["results"]["Textract"]["documents_processed"] == 0
+        assert summary["results"]["Textract"]["documents_failed"] == 1
+        assert not (tmp_path / "results" / HISTORY_FILENAME).exists()
+        assert not list((tmp_path / "results").glob("*-all-samples-*.json"))
+
 
 class TestReportingTheSaveToTheUser:
     """A run that was not saved must say so; the figures are gone otherwise."""

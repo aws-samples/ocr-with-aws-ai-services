@@ -34,7 +34,7 @@ class TextractEngine(OCREngine):
 
     def process_image(self, image, options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Process an image or PDF with Amazon Textract using S3 upload
+        Process an image or PDF with Amazon Textract
 
         With no feature types selected this calls the text-detection APIs
         (DetectDocumentText for images, StartDocumentTextDetection for PDFs). With
@@ -46,7 +46,7 @@ class TextractEngine(OCREngine):
             image: PIL Image, numpy array, path to image, or file path (including PDF)
             options: Dictionary of options including:
                 - output_schema: JSON schema for structuring the output
-                - s3_bucket: S3 bucket for processing (optional)
+                - s3_bucket: S3 bucket required for PDF processing
                 - feature_types: List of Textract feature types to request, any of
                   FORMS, TABLES, QUERIES, SIGNATURES, LAYOUT. Empty or absent means
                   text detection only.
@@ -135,11 +135,18 @@ class TextractEngine(OCREngine):
             logger.info("Processing as image file")
             image_bytes, img_pil = convert_to_bytes(image)
             
-        # Upload to S3 for processing
-        s3_object_key = self._upload_to_s3(file_bytes if is_pdf else image_bytes, s3_bucket, is_pdf)
-        
-        # Verify S3 upload
-        self._verify_s3_object(s3_bucket, s3_object_key)
+        # Only the asynchronous PDF APIs require S3. Synchronous image APIs accept
+        # document bytes directly, avoiding an unnecessary upload and bucket
+        # dependency for every image run.
+        s3_object_key = None
+        if is_pdf:
+            if not s3_bucket:
+                raise ValueError(
+                    "Textract PDF processing requires an S3 bucket in the same "
+                    "account and region. Set OCR_S3_BUCKET or enter one in the UI.")
+            s3_object_key = self._upload_to_s3(
+                file_bytes, s3_bucket, is_pdf=True)
+            self._verify_s3_object(s3_bucket, s3_object_key)
         
         # Start timing for all processing (including LLM)
         with timing_ctx:
@@ -155,8 +162,6 @@ class TextractEngine(OCREngine):
                 textract = get_aws_client('textract')
                 
                 # Use appropriate API based on file type and requested features
-                s3_document = {'S3Object': {'Bucket': s3_bucket, 'Name': s3_object_key}}
-
                 if is_pdf:
                     # PDF files require asynchronous processing
                     operation_type = 'textract_analyze_async' if feature_types else 'textract_async'
@@ -174,20 +179,25 @@ class TextractEngine(OCREngine):
                 elif feature_types:
                     # Images with feature types selected use synchronous analyze_document
                     logger.info(
-                        f"Calling Textract analyze_document ({feature_types}) for image S3 object: "
-                        f"s3://{s3_bucket}/{s3_object_key}"
+                        f"Calling Textract analyze_document ({feature_types}) "
+                        "with image bytes"
                     )
                     operation_type = 'textract_analyze'
-                    analyze_kwargs = {'Document': s3_document, 'FeatureTypes': feature_types}
+                    analyze_kwargs = {
+                        'Document': {'Bytes': image_bytes},
+                        'FeatureTypes': feature_types,
+                    }
                     if queries_config:
                         analyze_kwargs['QueriesConfig'] = queries_config
                     response = textract.analyze_document(**analyze_kwargs)
                     logger.info("Textract analyze_document call completed successfully")
                 else:
                     # Images with no feature types use synchronous detect_document_text
-                    logger.info(f"Calling Textract detect_document_text for image S3 object: s3://{s3_bucket}/{s3_object_key}")
+                    logger.info(
+                        "Calling Textract detect_document_text with image bytes")
                     operation_type = 'textract_detect'
-                    response = textract.detect_document_text(Document=s3_document)
+                    response = textract.detect_document_text(
+                        Document={'Bytes': image_bytes})
                     logger.info("Textract detect_document_text call completed successfully")
 
                 # Blocks for the requested features (forms, tables, queries,

@@ -139,7 +139,7 @@ def create_common_options_panel():
                     label="S3 Bucket for Processing",
                     value=DEFAULT_S3_BUCKET,
                     placeholder="Enter your S3 bucket name",
-                    info="S3 bucket for uploading files for processing (required for all engines). "
+                    info="Required for Textract PDFs; image calls use bytes directly. "
                          "Must be in the same account and region as your credentials. "
                          "Set OCR_S3_BUCKET to change the default.",
                     scale=2
@@ -149,7 +149,7 @@ def create_common_options_panel():
                     label="S3 Bucket for BDA Processing",
                     value=DEFAULT_BDA_S3_BUCKET,
                     placeholder="Enter your S3 bucket name for BDA",
-                    info="S3 bucket specifically for BDA processing. "
+                    info="Required for BDA input and output. "
                          "Set OCR_BDA_S3_BUCKET to change the default.",
                     scale=2
                 )
@@ -184,29 +184,27 @@ def create_common_options_panel():
                 )
 
         with gr.Accordion("🤖 Bedrock model", open=False):
-            with gr.Row():
-                bedrock_model = gr.Dropdown(
-                    choices=list(BEDROCK_MODELS.keys()),
-                    value="Claude Sonnet 5",
-                    label="Bedrock Model",
-                    info="Select an Amazon Bedrock model for processing. "
-                         "See the Bedrock models table in README.md for prices.",
-                    scale=2
-                )
+            bedrock_model = gr.Dropdown(
+                choices=list(BEDROCK_MODELS.keys()),
+                value="Claude Sonnet 5",
+                label="Bedrock Model",
+                info="Select an Amazon Bedrock model for processing. "
+                     "See the Bedrock models table in README.md for prices."
+            )
 
-                use_bda_blueprint = gr.Checkbox(
-                    label="Use Custom Blueprint (BDA)",
-                    value=False,
-                    # Names POSTPROCESSING_MODEL rather than hardcoding it, so the
-                    # tooltip cannot drift from the model actually used again.
-                    info=(
-                        f"Affects the BDA engine only. Enabled: BDA extracts against a "
-                        f"custom blueprint built from the output schema. Disabled: BDA "
-                        f"returns text, which {POSTPROCESSING_MODEL} then structures. "
-                        f"Either way an output schema is required."
-                    ),
-                    scale=1
+        with gr.Accordion("BDA options", open=False):
+            use_bda_blueprint = gr.Checkbox(
+                label="Use Custom Blueprint",
+                value=False,
+                # Names POSTPROCESSING_MODEL rather than hardcoding it, so the
+                # tooltip cannot drift from the model actually used again.
+                info=(
+                    f"Enabled: BDA extracts against a custom blueprint built from "
+                    f"the output schema. Disabled: BDA returns text, which "
+                    f"{POSTPROCESSING_MODEL} then structures. Either way an output "
+                    f"schema is required."
                 )
+            )
 
         with gr.Accordion("📋 Output schema", open=False):
             gr.Markdown("*Define the JSON schema for structured output, or upload one from a file*")

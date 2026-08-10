@@ -25,6 +25,7 @@ from shared.aws_client import (
     resolve_aws_profile,
     resolve_aws_region,
 )
+from shared.config import DEFAULT_AWS_REGION
 
 PROFILE_VARS = ("OCR_AWS_PROFILE", "AWS_PROFILE")
 REGION_VARS = ("OCR_AWS_REGION", "AWS_REGION", "AWS_DEFAULT_REGION")
@@ -156,9 +157,9 @@ def test_region_precedence(monkeypatch):
     assert resolve_aws_region() == "eu-central-1"
 
 
-def test_no_region_configured_returns_none():
-    """None defers to the profile's own region rather than inventing a default"""
-    assert resolve_aws_region() is None
+def test_no_region_configured_uses_application_default():
+    """A clean launch is deterministic rather than inheriting a profile region"""
+    assert resolve_aws_region() == DEFAULT_AWS_REGION == "us-east-1"
 
 
 def test_session_is_built_for_the_named_profile(monkeypatch, stub_profiles):

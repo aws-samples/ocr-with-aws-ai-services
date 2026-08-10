@@ -35,7 +35,11 @@ from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
 
 from shared.aws_client import get_aws_session
-from shared.config import MANTLE_ENDPOINT_TEMPLATE, logger
+from shared.config import (
+    MANTLE_ENDPOINT_TEMPLATE,
+    MANTLE_MODEL_REGION_OVERRIDES,
+    logger,
+)
 
 # SigV4 service name to sign Mantle requests with.
 #
@@ -58,26 +62,29 @@ class MantleApiError(RuntimeError):
     """Raised when the bedrock-mantle endpoint returns a non-2xx response"""
 
 
-def get_mantle_endpoint_url() -> str:
+def get_mantle_region(*, model_id: str) -> str:
+    """Resolve the endpoint region for one Mantle model."""
+    overridden_region = MANTLE_MODEL_REGION_OVERRIDES.get(model_id)
+    if overridden_region:
+        return overridden_region
+
+    region = get_aws_session().region_name
+    if not region:
+        raise RuntimeError("The AWS session did not resolve a region.")
+    return region
+
+
+def get_mantle_endpoint_url(*, model_id: str) -> str:
     """
-    Build the Responses API URL for the region the app is configured for
+    Build the Responses API URL for the model's resolved region
 
     Returns:
         str: Full URL of the /responses resource on the bedrock-mantle endpoint
 
     Raises:
-        RuntimeError: If no region is configured. The region is part of the hostname,
-            so there is no default that could be substituted - an unset region would
-            produce a URL that does not resolve, reported as a DNS failure rather
-            than as a configuration problem.
+        RuntimeError: If the AWS session unexpectedly has no region.
     """
-    region = get_aws_session().region_name
-    if not region:
-        raise RuntimeError(
-            "No AWS region is configured, but the bedrock-mantle hostname contains "
-            "the region. Set OCR_AWS_REGION or AWS_REGION, or give the AWS profile "
-            "a region."
-        )
+    region = get_mantle_region(model_id=model_id)
 
     return f"{MANTLE_ENDPOINT_TEMPLATE.format(region=region)}/responses"
 
@@ -250,10 +257,11 @@ def invoke_mantle_responses(
             urllib's own message is only the status line.
         RuntimeError: If no AWS region is configured.
     """
-    url = get_mantle_endpoint_url()
-    region = get_aws_session().region_name
+    region = get_mantle_region(model_id=model_id)
+    url = get_mantle_endpoint_url(model_id=model_id)
+    session = get_aws_session(region=region)
 
-    credentials = get_aws_session().get_credentials()
+    credentials = session.get_credentials()
     if credentials is None:
         raise MantleApiError(
             "No AWS credentials could be resolved, so the bedrock-mantle request "

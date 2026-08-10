@@ -14,8 +14,10 @@ import pytest
 from shared.config import (
     API_COSTS,
     BEDROCK_MODELS,
+    CONVERSE_STRUCTURED_OUTPUT_MODEL_IDS,
     MANTLE_ENDPOINT_TEMPLATE,
     MANTLE_MODEL_IDS,
+    MANTLE_MODEL_REGION_OVERRIDES,
     POSTPROCESSING_MODEL,
 )
 from shared.cost_calculator import calculate_bedrock_cost
@@ -23,6 +25,16 @@ from shared.cost_calculator import calculate_bedrock_cost
 # Enough tokens that any real per-token rate produces a cost well clear of the
 # rounding used in the reported figures.
 SAMPLE_TOKEN_USAGE = {"inputTokens": 100_000, "outputTokens": 20_000, "totalTokens": 120_000}
+
+CURRENT_US_EAST_RATES_PER_MILLION = {
+    "us.anthropic.claude-opus-5": (5.50, 27.50),
+    "us.anthropic.claude-sonnet-5": (2.20, 11.00),
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0": (1.10, 5.50),
+    "us.amazon.nova-2-lite-v1:0": (0.33, 2.75),
+    "openai.gpt-5.6-sol": (5.50, 33.00),
+    "openai.gpt-5.6-terra": (2.20, 13.20),
+    "openai.gpt-5.6-luna": (0.22, 1.32),
+}
 
 
 # --- the hazard these tests exist for ----------------------------------------
@@ -120,7 +132,8 @@ def test_rates_are_per_thousand_tokens_not_per_token() -> None:
     stored value a per-token rate and every reported Bedrock cost 1/1000 of the truth.
     A real Luna run billed at $0.0048 was displayed as $0.000005.
 
-    Anchored on Claude Sonnet 5 at its published $2 per 1M input tokens, because a
+    Anchored on Claude Sonnet 5 at its published $2.20 per 1M regional input-token
+    rate, because a
     relative assertion would hold equally well at the wrong scale.
     """
     _, cost = calculate_bedrock_cost(
@@ -128,7 +141,19 @@ def test_rates_are_per_thousand_tokens_not_per_token() -> None:
         {"inputTokens": 1_000_000, "outputTokens": 0, "totalTokens": 1_000_000},
     )
 
-    assert cost == pytest.approx(2.00)
+    assert cost == pytest.approx(2.20)
+
+
+def test_every_current_model_rate_matches_the_us_east_price_list() -> None:
+    """Pin the exact standard on-demand rates used by this us-east-1-default app."""
+    assert set(CURRENT_US_EAST_RATES_PER_MILLION) == set(API_COSTS["bedrock"])
+
+    for model_id, (input_per_million, output_per_million) in (
+        CURRENT_US_EAST_RATES_PER_MILLION.items()
+    ):
+        stored = API_COSTS["bedrock"][model_id]
+        assert stored["input"] * 1000 == pytest.approx(input_per_million)
+        assert stored["output"] * 1000 == pytest.approx(output_per_million)
 
 
 def test_a_typical_run_costs_a_realistic_amount() -> None:
@@ -177,6 +202,18 @@ def test_mantle_models_are_all_selectable() -> None:
     would be sent to `converse()`, which rejects it.
     """
     assert MANTLE_MODEL_IDS <= set(BEDROCK_MODELS.values())
+
+
+def test_mantle_region_overrides_only_name_mantle_models() -> None:
+    """A region override for a runtime model would never be consulted."""
+    assert set(MANTLE_MODEL_REGION_OVERRIDES) <= MANTLE_MODEL_IDS
+    assert MANTLE_MODEL_REGION_OVERRIDES["openai.gpt-5.6-sol"] == "us-east-1"
+
+
+def test_native_structured_output_models_are_runtime_models() -> None:
+    """Converse-only configuration must never be routed to Mantle."""
+    assert CONVERSE_STRUCTURED_OUTPUT_MODEL_IDS <= set(BEDROCK_MODELS.values())
+    assert CONVERSE_STRUCTURED_OUTPUT_MODEL_IDS.isdisjoint(MANTLE_MODEL_IDS)
 
 
 @pytest.mark.parametrize("model_id", sorted(MANTLE_MODEL_IDS))

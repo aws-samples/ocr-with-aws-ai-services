@@ -93,6 +93,22 @@ def handle_sample_selection(sample):
     return sample, None, gr.update(), None, None
 
 
+def clear_sample_context_for_upload():
+    """
+    Clear sample-derived state when the user uploads a different document
+
+    A programmatic file update from the sample dropdown fires `change` but not
+    `upload`, so this handler only runs for a user-supplied file. Keeping the previous
+    sample name would load that sample's truth.json for the new document and report a
+    meaningless accuracy score.
+
+    Returns:
+        Tuple of updates for the sample dropdown, sample-name state, truth JSON and
+        truth status.
+    """
+    return gr.update(value=None), "", None, "<div></div>"
+
+
 def setup_event_handlers(
     use_textract, use_bedrock, use_bda,
     sample_dropdown, input_image, s3_bucket, enable_structured_output, output_schema,
@@ -156,6 +172,11 @@ def setup_event_handlers(
         fn=handle_upload_preview,
         inputs=input_image,
         outputs=[image_preview, pdf_preview, pdf_controls, page_info, current_page, total_pages, current_pdf_path]
+    )
+
+    input_image.upload(
+        fn=clear_sample_context_for_upload,
+        outputs=[sample_dropdown, current_sample_name, truth_json, truth_status]
     )
     
     # Handle PDF page navigation

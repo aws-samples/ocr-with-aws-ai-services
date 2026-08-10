@@ -239,6 +239,32 @@ class TestComponentsSumToTheReportedTotal:
             not component.label.startswith("JSON structuring")
             for component in processed["cost_breakdown"])
 
+    @pytest.mark.parametrize(
+        "use_blueprint,expected_cost",
+        [(False, 0.003), (True, 0.005)],
+    )
+    def test_bda_image_uses_the_per_image_rate(
+        self, use_blueprint: bool, expected_cost: float
+    ) -> None:
+        """An uploaded image must not be charged at the more expensive PDF rate."""
+        processed = process_engine_result(
+            "BDA",
+            self._result(
+                operation_type="bda",
+                pages=1,
+                file_type="image",
+                use_blueprint=use_blueprint,
+                field_count=10,
+                token_usage=None),
+            truth_data=None,
+            truth_exists=False)
+
+        bda_charge = next(
+            component for component in processed["cost_breakdown"]
+            if component.label.startswith("BDA"))
+        assert bda_charge.amount == pytest.approx(expected_cost)
+        assert bda_charge.formula.endswith("per image")
+
     def test_bda_reporting_no_pages_raises_rather_than_billing_nothing(self) -> None:
         """A successful BDA run with no page count cannot be costed."""
         with pytest.raises(ValueError, match="cannot be calculated"):

@@ -54,6 +54,13 @@ class BDAEngine(OCREngine):
         document_type = options.get('document_type', 'generic')
         output_schema = options.get('output_schema')
         use_blueprint = options.get('use_blueprint', False)
+
+        if use_blueprint and not output_schema:
+            raise ValueError(
+                "BDA custom blueprint processing requires an output schema. "
+                "Enable structured output and provide a schema, or disable the "
+                "custom blueprint option."
+            )
         
         # Check if input is a PDF file
         is_pdf = self._is_pdf_input(image)
@@ -263,6 +270,12 @@ class BDAEngine(OCREngine):
             try:
                 account_id = get_account_id()
                 current_region = get_current_region()
+
+                if not s3_bucket:
+                    raise RuntimeError(
+                        "BDA requires an S3 bucket in the same account and region. "
+                        "Set OCR_BDA_S3_BUCKET or OCR_S3_BUCKET, or enter one in "
+                        "the UI.")
                 
                 # Validate S3 bucket.
                 #
@@ -499,6 +512,7 @@ class BDAEngine(OCREngine):
                     "json_process_time": json_process_time,
                     "field_count": field_count,
                     "use_blueprint": use_blueprint,
+                    "file_type": "pdf" if is_pdf else "image",
                     "pages": self._page_count(
                         is_pdf=is_pdf,
                         custom_output=custom_output,

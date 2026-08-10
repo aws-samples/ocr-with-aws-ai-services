@@ -12,6 +12,7 @@ from shared.image_utils import convert_to_bytes
 from shared.config import (
     logger,
     API_COSTS,
+    CONVERSE_STRUCTURED_OUTPUT_MODEL_IDS,
     MAX_IMAGE_SIZE,
     LLM_MAX_OUTPUT_TOKENS,
     MANTLE_MODEL_IDS,
@@ -106,7 +107,17 @@ class BedrockEngine(OCREngine):
 
                 # Get appropriate prompt based on document type
                 prompt = get_prompt_for_document_type(document_type)
-                prompt += get_json_formatting_instructions(output_schema)
+                uses_native_structured_output = (
+                    output_schema
+                    and model_id in CONVERSE_STRUCTURED_OUTPUT_MODEL_IDS
+                )
+                if uses_native_structured_output:
+                    prompt += (
+                        "\n\nExtract the document into the JSON structure required "
+                        "by the response schema."
+                    )
+                else:
+                    prompt += get_json_formatting_instructions(output_schema)
                 system_prompt = OCR_SYSTEM_PROMPT
 
                 # Create request payload based on file type
@@ -188,6 +199,20 @@ class BedrockEngine(OCREngine):
                         # so its output is the largest the app produces.
                         "inferenceConfig": {"maxTokens": LLM_MAX_OUTPUT_TOKENS}
                     }
+                    if uses_native_structured_output:
+                        converse_args["outputConfig"] = {
+                            "textFormat": {
+                                "type": "json_schema",
+                                "structure": {
+                                    "jsonSchema": {
+                                        # The SDK shape requires a JSON string,
+                                        # not the decoded schema object.
+                                        "schema": self._schema_json(output_schema),
+                                        "name": "ocr_result",
+                                    }
+                                },
+                            }
+                        }
 
                     response = bedrock_runtime.converse(**converse_args)
 
@@ -390,6 +415,23 @@ class BedrockEngine(OCREngine):
         if stripped.endswith("```"):
             stripped = stripped[:-3]
         return stripped.strip()
+
+    @staticmethod
+    def _schema_json(output_schema: Any) -> str:
+        """Validate and serialize a schema for Converse structured output."""
+        if isinstance(output_schema, str):
+            schema = json.loads(output_schema)
+        elif isinstance(output_schema, dict):
+            schema = output_schema
+        else:
+            raise ValueError(
+                "Output schema must be a JSON object or a JSON string, got "
+                f"{type(output_schema).__name__}")
+
+        if not isinstance(schema, dict):
+            raise ValueError("Output schema must decode to a JSON object")
+
+        return json.dumps(schema, separators=(",", ":"))
 
     # The two APIs spell a hit output limit differently: Converse reports 'max_tokens'
     # as 'stopReason', and the Mantle Responses API reports 'max_output_tokens' as

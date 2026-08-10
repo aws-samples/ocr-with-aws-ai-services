@@ -83,6 +83,24 @@ def _error_message(*, text: str) -> str:
     return remainder.strip() if separator else text.strip()
 
 
+def _failed_engine_result(*, engine_name: str, message: str, process_time: float = 0):
+    """Build the processed-result shape for an engine that did not complete."""
+    return {
+        "text": message,
+        "json": None,
+        "image": None,
+        "time": process_time,
+        "status_html": STATUS_HTML["error"](engine_name, process_time, message),
+        "accuracy": 0.0,
+        "token_usage": None,
+        "cost": 0.0,
+        "cost_html": "<div></div>",
+        "pages": 0,
+        "cost_breakdown": [],
+        "succeeded": False,
+    }
+
+
 def process_engine_result(engine_name, result, truth_data, truth_exists):
     """Process result from an OCR engine"""
     # Default values
@@ -108,7 +126,8 @@ def process_engine_result(engine_name, result, truth_data, truth_exists):
             "cost": 0.0,
             "cost_html": "<div></div>",
             "pages": 0,
-            "cost_breakdown": []
+            "cost_breakdown": [],
+            "succeeded": False,
         }
     
     # Extract common fields from result
@@ -147,7 +166,8 @@ def process_engine_result(engine_name, result, truth_data, truth_exists):
             # "unknown" by the results table, which leaves those cells blank
             # rather than dividing by zero or implying one page was read.
             "pages": 0,
-            "cost_breakdown": []
+            "cost_breakdown": [],
+            "succeeded": False,
         }
 
     # Every engine's charge is now assembled from CostComponents rather than from
@@ -199,6 +219,9 @@ def process_engine_result(engine_name, result, truth_data, truth_exists):
     elif engine_name == "BDA":
         field_count = result.get('field_count', 0)
         use_blueprint = result.get('use_blueprint', False)
+        bda_document_type = (
+            'image' if result.get('file_type') == 'image' else 'document'
+        )
 
         # BDA is priced per page, and this used to pass page_count=1 regardless,
         # so a seven-page document was billed as one. The engine now reports the
@@ -210,7 +233,7 @@ def process_engine_result(engine_name, result, truth_data, truth_exists):
 
         cost_breakdown += describe_bda_cost(
             use_blueprint=use_blueprint,
-            document_type='document',
+            document_type=bda_document_type,
             page_count=page_count,
             field_count=field_count)
 
@@ -224,7 +247,8 @@ def process_engine_result(engine_name, result, truth_data, truth_exists):
 
         cost = sum(component.amount for component in cost_breakdown)
         cost_html, _ = calculate_bda_cost(
-            use_blueprint, 'document', page_count=page_count, field_count=field_count)
+            use_blueprint, bda_document_type,
+            page_count=page_count, field_count=field_count)
 
     # One banner for every engine, itemised when more than one service was billed.
     if len(cost_breakdown) > 1:
@@ -258,7 +282,8 @@ def process_engine_result(engine_name, result, truth_data, truth_exists):
         "cost": cost,
         "cost_html": cost_html,
         "pages": page_count,
-        "cost_breakdown": cost_breakdown
+        "cost_breakdown": cost_breakdown,
+        "succeeded": True,
     }
 
 def create_comparison_view_for_engines(truth_data, truth_exists, engine_results):
@@ -318,7 +343,10 @@ def process_image_with_engines(image, use_textract, use_bedrock, use_bda,
             among textract_features.
     """
     total_start = time.time()
-    default_result = {"text": "", "json": None, "image": None, "time": 0, "accuracy": 0, "cost": 0}
+    default_result = {
+        "text": "", "json": None, "image": None, "time": 0,
+        "accuracy": 0, "cost": 0, "succeeded": None,
+    }
     default_bedrock_result = {**default_result, "token_usage": None, "cost_html": "<div></div>"}
 
     engine_results = {
@@ -446,7 +474,11 @@ def process_image_with_engines(image, use_textract, use_bedrock, use_bda,
                 {
                     'model_id': model_id,
                     'document_type': document_type,
-                    'output_schema': output_schema if output_schema else None
+                    'output_schema': (
+                        output_schema
+                        if enable_structured_output and output_schema
+                        else None
+                    )
                 }
             )
         
@@ -486,13 +518,12 @@ def process_image_with_engines(image, use_textract, use_bedrock, use_bda,
                 # Create results table
                 results_table_html = create_results_table_html({
                     name: data for name, data in engine_results.items() 
-                    if name in futures.keys()  # Only include selected engines
+                    if name in futures and data.get("succeeded") is True
                 })
                 
-                # Calculate global status
-                total_time = time.time() - total_start
-                total_cost = sum(data["cost"] for name, data in engine_results.items() if name in futures.keys())
-                global_status_html = STATUS_HTML["global_completed"](total_time, total_cost)
+                # Individual engine panels show progress as each future finishes.
+                # The global banner stays in progress until every future has settled.
+                global_status_html = STATUS_HTML["global_processing"]()
                 
                 # Update UI
                 yield [
@@ -527,8 +558,11 @@ def process_image_with_engines(image, use_textract, use_bedrock, use_bda,
             except Exception as e:
                 logger.error(f"Error in {engine_name} processing: {str(e)}")
                 
-                # Update error status for this engine
-                engine_status[engine_name] = STATUS_HTML["error"](engine_name, 0, str(e))
+                # Normalize raised exceptions to the same result shape used when an
+                # engine returns operation_type="error".
+                engine_results[engine_name] = _failed_engine_result(
+                    engine_name=engine_name, message=str(e))
+                engine_status[engine_name] = engine_results[engine_name]["status_html"]
                 
                 # Create comparison with available results
                 comparison_html = create_comparison_view_for_engines(truth_data, truth_exists, engine_results)
@@ -536,13 +570,10 @@ def process_image_with_engines(image, use_textract, use_bedrock, use_bda,
                 # Create results table
                 results_table_html = create_results_table_html({
                     name: data for name, data in engine_results.items() 
-                    if name in futures.keys() and "time" in data  # Only include successful engines
+                    if name in futures and data.get("succeeded") is True
                 })
                 
-                # Calculate global status
-                total_time = time.time() - total_start
-                total_cost = sum(data.get("cost", 0) for name, data in engine_results.items())
-                global_status_html = STATUS_HTML["global_completed"](total_time, total_cost)
+                global_status_html = STATUS_HTML["global_processing"]()
                 
                 # Update UI
                 yield [
@@ -581,35 +612,49 @@ def process_image_with_engines(image, use_textract, use_bedrock, use_bda,
     # and written to the record - so the saved figures are the figures on screen.
     selected_results = {
         name: data for name, data in engine_results.items()
-        if name in futures.keys()  # Only include selected engines
+        if name in futures and data.get("succeeded") is True
     }
     final_rows: List[RunRow] = build_run_rows(engine_results=selected_results)
     results_table_html = rows_to_html(rows=final_rows)
 
     # Final status
     total_time = time.time() - total_start
-    total_cost = sum(data["cost"] for name, data in engine_results.items() if name in futures.keys())
+    total_cost = sum(data["cost"] for data in selected_results.values())
+    failed_engines = sorted(
+        name for name in futures
+        if engine_results[name].get("succeeded") is not True)
 
     # Persist the run so it can be compared with later ones. Only here, at the end:
     # the intermediate yields describe a run still in progress.
-    saved_note = save_run_record(
-        document_name=image_name,
-        rows=final_rows,
-        total_time_s=total_time,
-        configuration={
-            "engines": sorted(futures.keys()),
-            "bedrock_model": bedrock_model_name if use_bedrock else None,
-            "bedrock_model_id": model_id or None,
-            "document_type": document_type,
-            "structured_output": enable_structured_output,
-            "bda_blueprint": use_bda_blueprint if use_bda else None,
-            "textract_features": sorted(textract_features or []) if use_textract else None,
-            "textract_queries": bool(textract_queries) if use_textract else None,
-        },
-        ground_truth_available=truth_exists)
+    saved_note = ""
+    if final_rows:
+        saved_note = save_run_record(
+            document_name=image_name,
+            rows=final_rows,
+            total_time_s=total_time,
+            configuration={
+                "engines": sorted(futures.keys()),
+                "failed_engines": failed_engines,
+                "bedrock_model": bedrock_model_name if use_bedrock else None,
+                "bedrock_model_id": model_id or None,
+                "document_type": document_type,
+                "structured_output": enable_structured_output,
+                "bda_blueprint": use_bda_blueprint if use_bda else None,
+                "textract_features": sorted(textract_features or []) if use_textract else None,
+                "textract_queries": bool(textract_queries) if use_textract else None,
+            },
+            ground_truth_available=truth_exists)
 
-    global_status_html = STATUS_HTML["global_completed"](
-        total_time, total_cost, saved_note)
+    success_count = len(selected_results)
+    if success_count == len(futures):
+        global_status_html = STATUS_HTML["global_completed"](
+            total_time, total_cost, saved_note)
+    elif success_count:
+        global_status_html = STATUS_HTML["global_partial"](
+            success_count, len(futures), total_time, total_cost, saved_note)
+    else:
+        global_status_html = STATUS_HTML["global_failed"](
+            len(futures), total_time)
 
 
     # Emit the final UI update. Again this must be a yield: a generator's return

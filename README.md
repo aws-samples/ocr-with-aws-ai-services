@@ -188,15 +188,16 @@ choose it:
 
 ```
 export OCR_AWS_PROFILE=your-profile
-export OCR_AWS_REGION=us-east-1     # optional
+export OCR_AWS_REGION=us-west-2     # optional override; default is us-east-1
 python app.py
 ```
 
 `OCR_AWS_PROFILE` takes precedence over `AWS_PROFILE`. It exists so this app can be
 pinned to one account without exporting `AWS_PROFILE` process-wide, which would also
-redirect other AWS tooling sharing the same shell. Region resolution follows the same
-order: `OCR_AWS_REGION`, then `AWS_REGION`, then `AWS_DEFAULT_REGION`, then whatever
-the profile declares.
+redirect other AWS tooling sharing the same shell. The app has no region selector in
+the UI and defaults to `us-east-1`. Deployments can override that default with
+`OCR_AWS_REGION`, then `AWS_REGION`, then `AWS_DEFAULT_REGION`, in that precedence
+order.
 
 With a profile set, startup logs the identity it will actually use:
 
@@ -226,8 +227,9 @@ trigger an interactive auth flow on the server.
 
 ### Selecting the S3 bucket
 
-Documents are staged in S3 before processing, so the bucket must exist in the same
-account and region as your credentials. Set it with `OCR_S3_BUCKET`:
+Textract PDFs and all BDA inputs are staged in S3, so the bucket must exist in the
+same account and region as your credentials. Textract images use request bytes
+directly and need no bucket. Set a bucket with `OCR_S3_BUCKET`:
 
 ```
 export OCR_S3_BUCKET=your-bucket
@@ -237,10 +239,8 @@ export OCR_BDA_S3_BUCKET=your-bda-bucket   # optional, defaults to OCR_S3_BUCKET
 Both values are also editable at run time in the **🪣 S3 buckets** section of the UI,
 which overrides the environment for that session.
 
-**Set it on a fresh clone.** With `OCR_S3_BUCKET` unset, `shared/config.py` falls back
-to the bucket this app was developed against, which is not in your account — so every
-staging upload fails with the `403` described next, and nothing in the message mentions
-a bucket name you did not choose.
+There is no baked-in bucket name. With `OCR_S3_BUCKET` unset, image-only Textract
+still works; Textract PDF and BDA runs report that a bucket must be configured.
 
 A bucket in someone else's account fails in a way that is easy to misread: S3 returns
 `403 Forbidden` for a bucket you do not own, not `404`, so an upload failure looks
@@ -288,20 +288,23 @@ Use `get-document-analysis` instead when any Textract feature was selected.
 
 ### Bedrock models
 
-The Bedrock engine offers four models, all vision-capable because every request here
+The Bedrock engine offers seven models, all vision-capable because every request here
 carries an image or a PDF:
 
-| Model              | Model ID                       | Endpoint          | Input / output per 1M tokens |
-| ------------------ | ------------------------------ | ----------------- | ---------------------------- |
-| Claude Sonnet 5    | `us.anthropic.claude-sonnet-5` | `bedrock-runtime` | $2 / $10 (see note)          |
-| Amazon Nova 2 Lite | `us.amazon.nova-2-lite-v1:0`   | `bedrock-runtime` | $0.30 / $2.50                |
-| GPT-5.6 Terra      | `openai.gpt-5.6-terra`         | `bedrock-mantle`  | $2.20 / $13.20               |
-| GPT-5.6 Luna       | `openai.gpt-5.6-luna`          | `bedrock-mantle`  | $0.22 / $1.32                |
+| Model              | Model ID                                            | Endpoint          | Input / output per 1M tokens |
+| ------------------ | --------------------------------------------------- | ----------------- | ---------------------------- |
+| Claude Opus 5      | `us.anthropic.claude-opus-5`                        | `bedrock-runtime` | $5.50 / $27.50               |
+| Claude Sonnet 5    | `us.anthropic.claude-sonnet-5`                      | `bedrock-runtime` | $2.20 / $11                  |
+| Claude Haiku 4.5   | `us.anthropic.claude-haiku-4-5-20251001-v1:0`       | `bedrock-runtime` | $1.10 / $5.50                |
+| Amazon Nova 2 Lite | `us.amazon.nova-2-lite-v1:0`                        | `bedrock-runtime` | $0.33 / $2.75                |
+| GPT-5.6 Sol        | `openai.gpt-5.6-sol`                                | `bedrock-mantle`  | $5.50 / $33                  |
+| GPT-5.6 Terra      | `openai.gpt-5.6-terra`                              | `bedrock-mantle`  | $2.20 / $13.20               |
+| GPT-5.6 Luna       | `openai.gpt-5.6-luna`                               | `bedrock-mantle`  | $0.22 / $1.32                |
 
-Claude Sonnet 5's rate is promotional launch pricing that runs through 2026-08-31,
-after which it becomes $3 / $15. The GPT-5.6 rates are the short-context
-(≤272K tokens) tier, which is the tier every request in this app falls into; the
-1M-context tier is exactly double.
+The table uses the standard on-demand rates for the app's default `us-east-1`
+configuration and its `us.` inference profiles. The GPT-5.6 rates are the
+short-context (≤272K tokens) tier, which is the tier every request in this app falls
+into; the 1M-context tier is exactly double.
 
 Text-only models are deliberately excluded, including the gpt-oss family — they cannot
 read a document at all, so they have nothing to contribute to an OCR comparison.
@@ -325,6 +328,9 @@ Two consequences worth knowing:
 
 - These models take **no `us.` prefix**. Neither geo nor global inference profiles
   exist for them, so the bare model ID is correct.
+- GPT-5.6 Sol is available in-region in `us-east-1`, so the app always sends Sol to
+  that Mantle endpoint even when `OCR_AWS_REGION` overrides the region used by the
+  other services.
 - They do not appear in `aws bedrock list-foundation-models`, which reports
   `bedrock-runtime` models only. Absence there looks exactly like the model not
   existing.
@@ -333,6 +339,10 @@ Cost reporting covers both endpoints. Note that the GPT-5.6 models emit reasonin
 tokens, which are billed as output tokens and count against
 `OCR_LLM_MAX_OUTPUT_TOKENS`, so they can exhaust that budget before producing any
 text. That is reported as truncation, the same as for the Converse models.
+
+When an output schema is supplied, Claude Haiku 4.5 uses Converse's native
+`outputConfig.textFormat` JSON schema enforcement. Opus 5, Sonnet 5 and Nova 2 Lite
+currently reject that field, so they retain prompt-based schema instructions.
 
 ### Structured output for multi-page PDFs
 
@@ -488,9 +498,8 @@ is what each half of it actually does. The value travels `ui.py` →
 `processor.process_image_with_engines(use_bda_blueprint=...)` →
 `BDAEngine.process_image(options={'use_blueprint': ...})` →
 `BDAEngine._process_with_bda(use_blueprint=...)`, and from there it picks one of the
-two BDA branches in the diagram above. **It affects the BDA engine only** — the
-checkbox currently sits in the **🤖 Bedrock model** accordion, next to the Bedrock
-model dropdown, but nothing in the Bedrock engine reads it.
+two BDA branches in the diagram above. **It affects the BDA engine only** and lives
+in its own **BDA options** accordion.
 
 |                          | **Checked** — custom blueprint                                                                                                                                                                                                                                                 | **Unchecked** (the default) — standard output + LLM                                                                                      |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -504,15 +513,11 @@ model dropdown, but nothing in the Bedrock engine reads it.
 | **Extracted Text** panel | The blueprint itself: name, ARN, every extraction field with its instruction, and the match confidence BDA reported                                                                                                                                                            | The document text BDA extracted                                                                                                          |
 | Blueprint lifetime       | One per run, deleted at the end of the run (`DeleteBlueprint`); a failure to delete is logged as a warning, not raised                                                                                                                                                         | n/a                                                                                                                                      |
 
-Three things the tooltip does not tell you:
+Details the tooltip does not cover:
 
-- **The blueprint is only built if a schema is present** (`if use_blueprint and
-output_schema`). Check the box with the schema editor empty, or with **Enable
-  Structured Output** off, and the run silently degrades to the worst of both paths:
-  no blueprint is created, BDA falls back to the `public-default` project, and the LLM
-  structuring step is skipped as well because it is gated on the checkbox being off.
-  The result is BDA's raw standard-output envelope, which scores 0% against a
-  schema-shaped ground truth — while still being billed at the custom-output rate.
+- **A blueprint requires a schema.** Checking the option while structured output is
+  disabled, or while the schema is empty, now stops before making an AWS request.
+  It does not silently fall back to standard output.
 - **The blueprint path is billed per field _per page_,** which is what makes it the
   most expensive row rather than merely a dearer one. `sample/pfl-synthetic` has 50
   leaf fields over 4 pages, so it costs `4 × $0.040` for the pages plus
@@ -525,14 +530,16 @@ output_schema`). Check the box with the schema editor empty, or with **Enable
   which is what it used to do. (`BDAEngine.get_cost()` still hardcodes
   `page_count=1`, but nothing calls it — `processor.py` prices the run through
   `describe_bda_cost()`.)
-- **Both rates in the table are the per-page _document_ rate, even for a single
-  image.** BDA prices images separately and more cheaply — $0.003 per image on
-  standard output, $0.005 on custom — and `shared/cost_calculator.py` implements both
-  tiers, but `processor.py` passes `document_type='document'` on every run. The seven
-  single-image bundles are therefore costed at the document rate, so BDA's figure on
-  those rows is an over-estimate: 3× on the standard-output path ($0.010 charged
-  against $0.003 published) and 8× on the blueprint path ($0.040 against $0.005). The
-  PDF rows this benchmark compares are unaffected.
+- **Images use the image rate.** Standard output is $0.003 per image and custom
+  output is $0.005 per image; PDFs use the $0.010/$0.040 per-page document rates.
+
+`InvokeDataAutomationAsync` remains intentional for this application. It supports
+both the multi-page PDFs the benchmark is built around and the AWS-managed
+`public-default` project. The newer synchronous `InvokeDataAutomation` accepts image
+bytes directly, but requires a separately provisioned project whose type is `SYNC`;
+the public default project is rejected by that API. The app therefore keeps one BDA
+execution model instead of creating persistent project infrastructure solely for
+image uploads.
 
 ### How the schema becomes a blueprint
 

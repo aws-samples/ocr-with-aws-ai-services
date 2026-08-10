@@ -25,6 +25,7 @@ from engines.bedrock_engine import BedrockEngine
 from shared.config import LLM_MAX_OUTPUT_TOKENS
 
 MODEL_ID = "us.anthropic.claude-sonnet-5"
+HAIKU_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 class FakeBedrockRuntime:
@@ -177,6 +178,30 @@ def test_image_path_sends_an_inference_config(fake_client, image) -> None:
     inference_config = client.converse_calls[0]["inferenceConfig"]
     assert inference_config["maxTokens"] == LLM_MAX_OUTPUT_TOKENS
     assert inference_config["maxTokens"] > 4096
+
+
+def test_haiku_uses_native_json_schema_output(fake_client, image) -> None:
+    """Haiku 4.5 accepts the latest Converse structured-output field."""
+    client = fake_client(converse_response=converse_body(json.dumps({"a": 1})))
+    schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
+
+    BedrockEngine().process_image(
+        image, {"model_id": HAIKU_MODEL_ID, "output_schema": json.dumps(schema)})
+
+    json_schema = client.converse_calls[0]["outputConfig"]["textFormat"][
+        "structure"]["jsonSchema"]
+    assert json.loads(json_schema["schema"]) == schema
+    assert json_schema["name"] == "ocr_result"
+
+
+def test_sonnet_keeps_prompt_based_schema_fallback(fake_client, image) -> None:
+    """Sonnet 5 currently rejects outputConfig, so it must not receive the field."""
+    client = fake_client(converse_response=converse_body(json.dumps({"a": 1})))
+
+    BedrockEngine().process_image(
+        image, {"model_id": MODEL_ID, "output_schema": '{"type":"object"}'})
+
+    assert "outputConfig" not in client.converse_calls[0]
 
 
 # --- truncation is reported --------------------------------------------------

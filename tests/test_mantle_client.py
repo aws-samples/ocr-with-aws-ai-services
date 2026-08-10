@@ -24,6 +24,8 @@ from shared.mantle_client import (
     build_responses_request,
     extract_output_text,
     extract_token_usage,
+    get_mantle_endpoint_url,
+    get_mantle_region,
 )
 
 MANTLE_MODEL_ID = "openai.gpt-5.6-luna"
@@ -31,6 +33,32 @@ RUNTIME_MODEL_ID = "us.anthropic.claude-sonnet-5"
 
 IMAGE_BYTES = b"\xff\xd8\xff not really a jpeg"
 PDF_BYTES = b"%PDF-1.4 not really a pdf"
+
+
+def test_mantle_models_use_the_application_region_by_default(monkeypatch) -> None:
+    """Models without a regional restriction follow the configured app region."""
+    import shared.mantle_client as mantle_client
+
+    class FakeSession:
+        region_name = "us-west-2"
+
+    monkeypatch.setattr(mantle_client, "get_aws_session", lambda *a, **k: FakeSession())
+
+    assert get_mantle_region(model_id="openai.gpt-5.6-terra") == "us-west-2"
+    assert "us-west-2" in get_mantle_endpoint_url(model_id="openai.gpt-5.6-terra")
+
+
+def test_sol_is_always_routed_to_us_east_1(monkeypatch) -> None:
+    """Sol is in-region us-east-1 and returns 404 from the us-west-2 endpoint."""
+    import shared.mantle_client as mantle_client
+
+    class FakeSession:
+        region_name = "us-west-2"
+
+    monkeypatch.setattr(mantle_client, "get_aws_session", lambda *a, **k: FakeSession())
+
+    assert get_mantle_region(model_id="openai.gpt-5.6-sol") == "us-east-1"
+    assert "us-east-1" in get_mantle_endpoint_url(model_id="openai.gpt-5.6-sol")
 
 
 def mantle_response(

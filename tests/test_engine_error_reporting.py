@@ -10,7 +10,9 @@ came to look like "BDA doesn't show accuracy".
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PIL import Image
 
+import processor
 from engines.bda_engine import BDAEngine
 from processor import _error_message, process_engine_result
 
@@ -110,6 +112,11 @@ class TestFailedRunIsReportedAsFailed:
         assert processed["time"] == 7.5
         assert "7.500" in processed["status_html"]
 
+    @pytest.mark.parametrize("engine", ENGINES)
+    def test_processed_result_is_explicitly_marked_failed(self, engine):
+        processed = process_engine_result(engine, error_result(engine), TRUTH, True)
+        assert processed["succeeded"] is False
+
 
 class TestBdaBucketFailureIsShapedAsAnError:
     """A bucket that cannot be reached is a failure, not a zero-page success.
@@ -169,6 +176,15 @@ class TestBdaBucketFailureIsShapedAsAnError:
         assert processed["cost"] == 0.0
 
 
+def test_bda_blueprint_requires_an_output_schema():
+    """A checked blueprint option must not silently fall back to standard output."""
+    with pytest.raises(ValueError, match="requires an output schema"):
+        BDAEngine().process_image(
+            Image.new("RGB", (8, 8), "white"),
+            {"use_blueprint": True, "output_schema": None},
+        )
+
+
 class TestSuccessfulRunStillScores:
     """The error check must not intercept anything that actually worked."""
 
@@ -189,6 +205,7 @@ class TestSuccessfulRunStillScores:
         assert "completed" in processed["status_html"]
         assert processed["accuracy"] == 100.0
         assert "Accuracy: 100.0%" in processed["status_html"]
+        assert processed["succeeded"] is True
 
     def test_success_without_truth_reports_completion_and_no_accuracy(self):
         result = {
@@ -206,3 +223,84 @@ class TestSuccessfulRunStillScores:
         processed = process_engine_result("BDA", result, None, False)
         assert "completed" in processed["status_html"]
         assert "Accuracy:" not in processed["status_html"]
+        assert processed["succeeded"] is True
+
+
+def test_all_failed_engines_do_not_report_success_or_write_history(
+    tmp_path, monkeypatch
+):
+    """An error response is not a benchmark observation."""
+    class FailingTextract:
+        def process_image(self, image, options=None):
+            return error_result("Textract")
+
+    class UnusedEngine:
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(processor, "TextractEngine", FailingTextract)
+    monkeypatch.setattr(processor, "BedrockEngine", UnusedEngine)
+    monkeypatch.setattr(processor, "BDAEngine", UnusedEngine)
+
+    payloads = list(processor.process_image_with_engines(
+        Image.new("RGB", (8, 8), "white"),
+        True, False, False, "Claude Sonnet 5",
+        image_name="upload.png"))
+    final_status = payloads[-1][0]
+
+    assert "ocr-banner--error" in final_status
+    assert "All engines completed" not in final_status
+    assert not (tmp_path / "results").exists()
+
+
+@pytest.mark.parametrize(
+    "enabled,expected_schema",
+    [
+        (True, '{"type":"object"}'),
+        (False, None),
+    ],
+)
+def test_structured_output_toggle_controls_single_file_bedrock_schema(
+    enabled, expected_schema, tmp_path, monkeypatch
+):
+    """The UI toggle must affect Bedrock as well as Textract and BDA."""
+    captured_options = []
+
+    class CapturingBedrock:
+        def process_image(self, image, options=None):
+            captured_options.append(options)
+            return {
+                "text": "{}",
+                "json": {},
+                "image": None,
+                "process_time": 0.01,
+                "token_usage": {
+                    "inputTokens": 1,
+                    "outputTokens": 1,
+                    "totalTokens": 2,
+                },
+                "pages": 1,
+                "operation_type": "bedrock",
+                "model_id": options["model_id"],
+            }
+
+    class UnusedEngine:
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(processor, "TextractEngine", UnusedEngine)
+    monkeypatch.setattr(processor, "BedrockEngine", CapturingBedrock)
+    monkeypatch.setattr(processor, "BDAEngine", UnusedEngine)
+
+    list(processor.process_image_with_engines(
+        Image.new("RGB", (8, 8), "white"),
+        False,
+        True,
+        False,
+        "Claude Sonnet 5",
+        enable_structured_output=enabled,
+        output_schema='{"type":"object"}',
+        image_name="upload.png",
+    ))
+
+    assert captured_options[0]["output_schema"] == expected_schema

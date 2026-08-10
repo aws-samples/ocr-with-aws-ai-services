@@ -92,10 +92,10 @@ def test_bda_bucket_can_be_set_independently(reloaded_config):
 
 
 def test_blank_override_is_ignored(reloaded_config):
-    """An exported-but-empty variable must not produce an empty bucket name"""
+    """A blank override must not revive a repository-specific bucket."""
     config = reloaded_config(OCR_S3_BUCKET="   ")
 
-    assert config.DEFAULT_S3_BUCKET.strip() != ""
+    assert config.DEFAULT_S3_BUCKET == ""
     assert config.DEFAULT_S3_BUCKET not in FOREIGN_BUCKETS
 
 

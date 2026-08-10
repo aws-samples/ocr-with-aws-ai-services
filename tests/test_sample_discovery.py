@@ -22,6 +22,7 @@ from sample_handler import (
     load_sample_document_and_schema,
     load_sample_schema,
     resolve_sample_path,
+    sample_result_directory,
     sample_schema_path,
 )
 from shared.evaluator import load_truth_data
@@ -29,6 +30,7 @@ from shared.sample_paths import (
     SCHEMA_FILENAME,
     TRUTH_FILENAME,
     bundle_document_path,
+    sample_document_path,
     sample_truth_path,
 )
 
@@ -207,6 +209,21 @@ def test_an_empty_bundle_directory_raises_on_selection(sample_tree):
         resolve_sample_path("docs-only")
 
 
+def test_parent_path_cannot_select_files_outside_sample_root(sample_tree):
+    """A forged dropdown value must not turn into a filesystem path."""
+    outside = sample_tree.parent / "outside"
+    outside.mkdir()
+    (outside / "outside.pdf").write_bytes(b"%PDF-1.4 fake")
+    (outside / SCHEMA_FILENAME).write_text(json.dumps(SCHEMA))
+    (outside / TRUTH_FILENAME).write_text(json.dumps(TRUTH))
+    forged_label = os.path.join("..", "outside")
+
+    assert sample_document_path(sample_name=forged_label) is None
+    assert sample_schema_path(forged_label) is None
+    assert sample_truth_path(sample_name=forged_label) is None
+    assert load_truth_data(forged_label) == ({}, False)
+
+
 def test_schema_and_truth_live_inside_the_bundle(sample_tree):
     """
     Both sit beside the document rather than in shared directories keyed on filename
@@ -247,6 +264,26 @@ def test_same_named_documents_in_different_bundles_keep_separate_truth(sample_tr
 
     assert first == {"claimNumber": "SYN-1000001"}
     assert second == {"claimNumber": "SYN-2000002"}
+
+
+def test_same_named_nested_bundles_get_distinct_result_directories(sample_tree):
+    """Batch output keeps the group path instead of collapsing to one basename."""
+    for group in ("first-group", "second-group"):
+        directory = sample_tree / group / "receipt"
+        directory.mkdir(parents=True)
+        (directory / "scan.pdf").write_bytes(b"%PDF-1.4 fake")
+
+    run_dir = os.path.join("results", "run-test")
+    first = sample_result_directory(
+        run_dir=run_dir,
+        sample_name=os.path.join("first-group", "receipt"))
+    second = sample_result_directory(
+        run_dir=run_dir,
+        sample_name=os.path.join("second-group", "receipt"))
+
+    assert first != second
+    assert first == os.path.join(run_dir, "first-group", "receipt")
+    assert second == os.path.join(run_dir, "second-group", "receipt")
 
 
 def test_truth_is_absent_for_a_bundle_without_it(sample_tree):

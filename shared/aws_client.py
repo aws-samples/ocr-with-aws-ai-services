@@ -6,6 +6,8 @@ import boto3
 import botocore.session
 from botocore.exceptions import BotoCoreError, ClientError
 
+from shared.config import DEFAULT_AWS_REGION
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -63,20 +65,20 @@ def resolve_aws_profile() -> tuple[str | None, str]:
     return None, "no profile configured"
 
 
-def resolve_aws_region() -> str | None:
+def resolve_aws_region() -> str:
     """
     Determine which AWS region the app should target
 
     Returns:
-        Region name from the first populated entry of REGION_ENV_VARS, or None to let
-        the resolved profile supply its own region
+        Region name from the first populated entry of REGION_ENV_VARS, otherwise the
+        application default
     """
     for env_var in REGION_ENV_VARS:
         region = os.environ.get(env_var, "").strip()
         if region:
             return region
 
-    return None
+    return DEFAULT_AWS_REGION
 
 
 @lru_cache(maxsize=8)
@@ -89,7 +91,7 @@ def get_aws_session(region: str | None = None) -> boto3.session.Session:
 
     Args:
         region: Region override. When None the region is resolved from the
-                environment, then from the profile itself.
+                environment, then from the application default.
 
     Returns:
         Boto3 session for the configured profile and region
@@ -103,12 +105,11 @@ def get_aws_session(region: str | None = None) -> boto3.session.Session:
     session_kwargs: dict[str, str] = {}
     if profile_name:
         session_kwargs["profile_name"] = profile_name
-    if effective_region:
-        session_kwargs["region_name"] = effective_region
+    session_kwargs["region_name"] = effective_region
 
     logger.debug(
         f"Creating boto3 session (profile: {profile_name or 'default chain'} "
-        f"[{profile_source}], region: {effective_region or 'from profile'})"
+        f"[{profile_source}], region: {effective_region})"
     )
 
     return boto3.session.Session(**session_kwargs)
@@ -160,7 +161,7 @@ def get_current_region() -> str | None:
     Get the current AWS region
 
     Returns:
-        AWS region name, or None if no region is configured anywhere
+        AWS region name
     """
     return get_aws_session().region_name
 
@@ -249,7 +250,7 @@ def log_aws_identity() -> None:
         logger.error(f"AWS profile misconfigured: {profile_error}")
         return
 
-    region = resolve_aws_region() or "from profile"
+    region = resolve_aws_region()
 
     try:
         identity = get_aws_client("sts").get_caller_identity()

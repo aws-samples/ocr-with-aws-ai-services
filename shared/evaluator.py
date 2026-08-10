@@ -26,7 +26,7 @@ def load_truth_data(image_name: str) -> Tuple[Dict[str, Any], bool]:
     # truth used to sit in a directory separate from the document itself.
     truth_path = sample_truth_path(sample_name=image_name)
 
-    if os.path.exists(truth_path):
+    if truth_path and os.path.exists(truth_path):
         try:
             with open(truth_path, "r") as f:
                 truth_data = json.load(f)
@@ -37,7 +37,7 @@ def load_truth_data(image_name: str) -> Tuple[Dict[str, Any], bool]:
         except Exception as e:
             logger.error(f"Error loading truth data from {truth_path}: {e}")
     else:
-        logger.info(f"No truth data found for {image_name} at {truth_path}")
+        logger.info(f"No truth data found for {image_name}")
     
     return {}, False
 

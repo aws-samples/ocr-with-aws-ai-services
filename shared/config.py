@@ -12,21 +12,22 @@ logger = logging.getLogger(__name__)
 # Image size constants
 MAX_IMAGE_SIZE = 5 * 1024 * 1024 - 100000  # 5MB minus buffer for Bedrock
 
+# Default region for every AWS service used by the app. There is deliberately no
+# region control in the UI: deployments that need another region can set
+# OCR_AWS_REGION without making a per-run infrastructure choice part of the
+# benchmarking workflow.
+DEFAULT_AWS_REGION = "us-east-1"
+
 # S3 buckets used to stage documents for processing.
 #
-# Textract's PDF path is asynchronous and can only read from S3, so a reachable
-# bucket in the same account and region as the API call is mandatory - not a
-# convenience. The previous defaults ('ocr-with-ai-services-demo-bucket' and
-# 'my-bda-demo-bucket') are names in the global S3 namespace owned by other
-# accounts: HeadBucket returns 403 Forbidden rather than 404, so every upload
-# failed with AccessDenied no matter which credentials were used.
+# Textract's PDF path and every BDA path stage through S3, so their bucket must
+# belong to the configured account and region. Image-only Textract calls use bytes
+# directly and need no bucket.
 #
 # Defined here once instead of being repeated across ui.py, processor.py,
 # sample_handler.py and engines/textract_engine.py, and overridable per
 # environment so the bucket does not have to be edited in code.
-DEFAULT_S3_BUCKET = (
-    os.environ.get("OCR_S3_BUCKET", "").strip() or "idp-testsetbucket-wxwjq6eoivpn"
-)
+DEFAULT_S3_BUCKET = os.environ.get("OCR_S3_BUCKET", "").strip()
 
 # BDA writes its output alongside its input, but is otherwise no different, so it
 # shares the main bucket unless given one of its own.
@@ -49,11 +50,21 @@ DEFAULT_BDA_S3_BUCKET = (
 # Only vision-capable models belong here: this is an OCR benchmark, so every entry
 # is sent an image or a PDF. That rules out the gpt-oss family, which is text-only.
 BEDROCK_MODELS = {
+    "Claude Opus 5": "us.anthropic.claude-opus-5",
     "Claude Sonnet 5": "us.anthropic.claude-sonnet-5",
+    "Claude Haiku 4.5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "Amazon Nova 2 Lite": "us.amazon.nova-2-lite-v1:0",
+    "GPT-5.6 Sol": "openai.gpt-5.6-sol",
     "GPT-5.6 Terra": "openai.gpt-5.6-terra",
     "GPT-5.6 Luna": "openai.gpt-5.6-luna"
 }
+
+# Models verified against the live Converse API to accept JSON schema through
+# outputConfig.textFormat. Other selectable runtime models reject this field, so
+# they keep the prompt-based JSON instructions.
+CONVERSE_STRUCTURED_OUTPUT_MODEL_IDS = frozenset({
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+})
 
 # Models reached through the bedrock-mantle endpoint rather than bedrock-runtime.
 #
@@ -69,9 +80,17 @@ BEDROCK_MODELS = {
 # profiles exist for them, so the bare model ID is correct.
 # https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-terra.html
 MANTLE_MODEL_IDS = frozenset({
+    "openai.gpt-5.6-sol",
     "openai.gpt-5.6-terra",
     "openai.gpt-5.6-luna"
 })
+
+# Mantle availability is model-specific. Sol is an in-region model available in
+# us-east-1, so an application-wide region override must not accidentally route it
+# to a regional endpoint where the model returns 404.
+MANTLE_MODEL_REGION_OVERRIDES = {
+    "openai.gpt-5.6-sol": "us-east-1",
+}
 
 # The path is "/openai/v1" for the GPT-5.6 family specifically, not the bare "/v1"
 # that other models on this endpoint use.
@@ -193,21 +212,31 @@ API_COSTS = {
     # engine rather than as an error. tests/test_model_config.py enforces that too.
     'bedrock': {
         'us.anthropic.claude-sonnet-5': {
-            # Promotional launch pricing of $2/$10 per 1M runs through 2026-08-31,
-            # after which the standard rate is $3/$15. Update this on 2026-09-01.
-            'input': 0.002,     # $2 per 1M input tokens
-            'output': 0.010     # $10 per 1M output tokens
+            'input': 0.0022,    # $2.20 per 1M input tokens
+            'output': 0.011     # $11 per 1M output tokens
+        },
+        'us.anthropic.claude-opus-5': {
+            'input': 0.0055,    # $5.50 per 1M input tokens
+            'output': 0.0275    # $27.50 per 1M output tokens
+        },
+        'us.anthropic.claude-haiku-4-5-20251001-v1:0': {
+            'input': 0.0011,    # $1.10 per 1M input tokens
+            'output': 0.0055    # $5.50 per 1M output tokens
         },
         'us.amazon.nova-2-lite-v1:0': {
             # Nova 2 Lite bills image and document-page input at a flat 230 tokens
             # per page regardless of resolution, so per-page cost here is stable.
-            'input': 0.0003,    # $0.30 per 1M input tokens
-            'output': 0.0025    # $2.50 per 1M output tokens
+            'input': 0.00033,   # $0.33 per 1M input tokens
+            'output': 0.00275   # $2.75 per 1M output tokens
         },
         # The GPT-5.6 models are priced at two tiers by prompt size. These are the
         # short-context (<=272K tokens) rates, which is the tier every request in
         # this app falls into - a long document runs to tens of thousands of tokens,
         # not hundreds of thousands. The 1M-context tier is exactly double.
+        'openai.gpt-5.6-sol': {
+            'input': 0.0055,    # $5.50 per 1M input tokens
+            'output': 0.033     # $33 per 1M output tokens
+        },
         'openai.gpt-5.6-terra': {
             'input': 0.0022,    # $2.20 per 1M input tokens
             'output': 0.0132    # $13.20 per 1M output tokens
@@ -233,10 +262,9 @@ API_COSTS = {
 
 # Status banners.
 #
-# The six signatures are unchanged - callers across processor.py and sample_handler.py
-# unpack them positionally - but the HTML now comes from shared.ui_theme.banner(), so
-# no colour is chosen here. Each of these used to hardcode a saturated background with
-# white text, which was readable but meant six more places asserting a palette.
+# Existing signatures remain compatible with callers across processor.py and
+# sample_handler.py, but the HTML comes from shared.ui_theme.banner(), so no colour
+# is chosen here.
 STATUS_HTML = {
     "processing": lambda engine: banner(
         tone="info", text=f"Processing with <b>{engine}</b>…"),
@@ -256,8 +284,12 @@ STATUS_HTML = {
         tone="ok",
         text=f"All engines completed in <code>{time:.3f}s</code> "
              f"· total est. cost <code>${cost:.6f}</code>{saved_note}"),
-    "global_partial": lambda success, total, time, cost: banner(
+    "global_partial": lambda success, total, time, cost, saved_note="": banner(
         tone="warn",
         text=f"<b>{success}/{total}</b> engines completed in <code>{time:.3f}s</code> "
-             f"· total est. cost <code>${cost:.6f}</code>")
+             f"· total est. cost <code>${cost:.6f}</code>{saved_note}"),
+    "global_failed": lambda total, time: banner(
+        tone="error",
+        text=f"All <b>{total}</b> engines failed after <code>{time:.3f}s</code> "
+             "· no benchmark result was saved")
 }

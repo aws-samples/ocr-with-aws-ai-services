@@ -27,6 +27,7 @@ can assert an exact filename and an exact record.
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -78,7 +79,9 @@ def _filename_slug(*, document_name: str) -> str:
         ValueError: If nothing usable is left. A record whose name says nothing
             about the document it describes is not worth writing.
     """
-    base_name = Path(document_name).stem
+    # Grouping labels remain in the record body, but never become directories in
+    # the record filename.
+    base_name = os.path.splitext(os.path.basename(document_name))[0]
     slug = _UNSAFE_IN_FILENAME.sub("-", base_name).strip("-")
 
     if not slug:
