@@ -1,0 +1,231 @@
+{
+  "type": "object",
+  "properties": {
+    "requestPartA": {
+      "type": "object",
+      "description": "Part A, completed by the employee",
+      "properties": {
+        "employeeName": {
+          "type": "string"
+        },
+        "claimNumber": {
+          "type": "string"
+        },
+        "employeeCity": {
+          "type": "string"
+        },
+        "employeeState": {
+          "type": "string"
+        },
+        "employeeZipCode": {
+          "type": "string"
+        },
+        "gender": {
+          "type": "string"
+        },
+        "preferredLanguage": {
+          "type": "string"
+        },
+        "race": {
+          "type": "string"
+        },
+        "reasonForRequest": {
+          "type": "string"
+        },
+        "familyMemberRelationship": {
+          "type": "string"
+        },
+        "leaveScheduleType": {
+          "type": "string"
+        },
+        "leaveStartDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "leaveEndDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "datesAreEstimated": {
+          "type": "boolean"
+        },
+        "employeeDateOfHire": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "hasMoreThanOneEmployer": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "takingLeaveFromOtherEmployer": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "receivingWorkersCompensation": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "employeeSignatureDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        }
+      }
+    },
+    "requestPartB": {
+      "type": "object",
+      "description": "Part B, completed by the employer",
+      "properties": {
+        "employerName": {
+          "type": "string"
+        },
+        "employerFein": {
+          "type": "string"
+        },
+        "employerDateOfHire": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "occupationCode": {
+          "type": "string"
+        },
+        "grossWages": {
+          "type": "array",
+          "description": "One entry per week of reported wages",
+          "items": {
+            "type": "object",
+            "properties": {
+              "weekNumber": {
+                "type": "number"
+              },
+              "weekEndingDate": {
+                "type": "string",
+                "description": "ISO 8601 date (YYYY-MM-DD)"
+              },
+              "numberOfDaysWorked": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "Blank where the week was not reported"
+              },
+              "grossAmountPaid": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        "calculatedAverageGrossWeeklyWage": {
+          "type": "number"
+        },
+        "requestingReimbursement": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "leaveTakenInPreceding52Weeks": {
+          "type": "string"
+        },
+        "takingFmlaConcurrently": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "employerSignatureDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "employerTitle": {
+          "type": "string"
+        },
+        "insuranceCarrier": {
+          "type": "object",
+          "description": "Carrier providing the coverage",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "streetAddress": {
+              "type": "string"
+            },
+            "city": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "zipCode": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "bondingCertification": {
+      "type": "object",
+      "description": "Certification of the birth or placement of a child",
+      "properties": {
+        "childName": {
+          "type": "string"
+        },
+        "childDateOfBirth": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        },
+        "childGender": {
+          "type": "string"
+        },
+        "childLivesWithEmployee": {
+          "type": "string",
+          "enum": [
+            "Yes",
+            "No"
+          ]
+        },
+        "relationshipToChild": {
+          "type": "string"
+        },
+        "documentationAttached": {
+          "type": "string"
+        },
+        "employeeSignatureDate": {
+          "type": "string",
+          "description": "ISO 8601 date (YYYY-MM-DD)"
+        }
+      }
+    },
+    "paymentEnrollment": {
+      "type": "object",
+      "description": "How benefits are paid",
+      "properties": {
+        "policyNumber": {
+          "type": "string"
+        },
+        "carrierTelephoneNumber": {
+          "type": "string"
+        },
+        "paymentMethod": {
+          "type": "string"
+        },
+        "accountType": {
+          "type": "string"
+        },
+        "bankRoutingNumberLastFour": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

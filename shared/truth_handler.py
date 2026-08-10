@@ -1,62 +1,50 @@
 # truth_handler.py
 
-import os
-import json
-import logging
-from typing import Dict, Any, Tuple, Optional, List
-
-from shared.config import logger
 from shared.evaluator import load_truth_data
+from shared.ui_theme import banner
+
+
+def truth_status_banner(*, sample_name: str, truth_exists: bool) -> str:
+    """
+    Build the banner reporting whether ground truth was found for a document
+
+    Lives here, and is called from processor.py and sample_handler.py, because this
+    exact banner was previously written out four separate times - each copy with its
+    own hardcoded colour, so a change to any one of them silently diverged.
+
+    Args:
+        sample_name (str): Name of the document, as shown to the user.
+        truth_exists (bool): Whether a ground truth file was found for it.
+
+    Returns:
+        str: An HTML div.
+    """
+    if truth_exists:
+        return banner(tone="ok", text=f"Ground truth available for <b>{sample_name}</b>")
+
+    return banner(
+        tone="warn",
+        text=f"No ground truth for <b>{sample_name}</b> — accuracy cannot be scored"
+    )
+
 
 def on_sample_selected_truth(sample_filename):
     """
     Handle sample selection and load truth data
-    
+
     Args:
         sample_filename: Name of the selected sample file
-        
+
     Returns:
         Tuple of (truth_data, truth_status_html)
     """
-    # Load truth data if available
     truth_data, truth_exists = load_truth_data(sample_filename)
-    
-    # Create truth status HTML based on whether truth data exists
-    if truth_exists:
-        truth_status_html = f"""<div style='padding: 10px; background-color: #2e7d32; color: white; 
-                                border-radius: 5px; font-weight: bold;'>Ground truth data available for {sample_filename}</div>"""
-    else:
-        truth_status_html = f"""<div style='padding: 10px; background-color: #ed6c02; color: white; 
-                                border-radius: 5px; font-weight: bold;'>No ground truth data available for {sample_filename}</div>"""
-    
-    return truth_data, truth_status_html
 
-def add_accuracy_column_to_results(results_by_engine):
-    """
-    Add accuracy column to results DataFrame
-    
-    Args:
-        results_by_engine: Dictionary of results by engine
-        
-    Returns:
-        List of dictionaries with result data including accuracy
-    """
-    final_results = []
-    for engine, data in results_by_engine.items():
-        result_row = {
-            "Engine": engine,
-            "Samples Processed": data["count"],
-            "Avg. Processing Time (s)": f"{data["total_time"] / data["count"]:.3f}",
-            "Avg. Cost ($)": round(data["total_cost"] / data["count"], 6),
-            "Total Cost ($)": round(data["total_cost"], 6)
-        }
-        
-        # Add accuracy if available
-        if "accuracy" in data:
-            result_row["Accuracy (%)"] = data["accuracy"]
-        else:
-            result_row["Accuracy (%)"] = 0.0
-        
-        final_results.append(result_row)
-    
-    return final_results
+    return truth_data, truth_status_banner(
+        sample_name=sample_filename, truth_exists=truth_exists)
+
+# add_accuracy_column_to_results() was removed here. It built rows with the old
+# "Samples Processed" / "Avg. Processing Time (s)" columns, had no caller anywhere in
+# the app, and would have raised ZeroDivisionError for any engine that processed
+# nothing. shared/results_table.build_run_rows() is now the only place a comparison
+# row is built, for both the single-document and the batch path.

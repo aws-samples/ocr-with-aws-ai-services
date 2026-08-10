@@ -1,5 +1,6 @@
 # Core dependencies with pinned versions for security and stability
 gradio==5.31.0
+requests
 boto3
 
 # Image processing dependencies
